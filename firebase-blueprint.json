@@ -1,0 +1,36 @@
+{
+  "entities": {
+    "Item": {
+      "title": "Item",
+      "description": "연근마켓에 등록된 중고 나눔 및 거래 물품",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "물품 이름" },
+        "category": { "type": "string", "description": "카테고리" },
+        "location": { "type": "string", "description": "기숙사 거래 장소" },
+        "price": { "type": "string", "description": "가격 (무료나눔 또는 금액)" },
+        "icon": { "type": "string", "description": "아이콘 클래스" },
+        "imageUrl": { "type": "string", "description": "Firebase Storage 원본 이미지 다운로드 URL" },
+        "image": { "type": "string", "description": "호환용 이미지 URL" },
+        "status": { "type": "string", "description": "상태 (나눔중, 예약중, 완료, 무료)" },
+        "seller": { "type": "string", "description": "판매자 이름 및 위치" },
+        "sellerUsername": { "type": "string", "description": "판매자 아이디" },
+        "description": { "type": "string", "description": "상세 설명" },
+        "date": { "type": "string", "description": "등록 날짜" },
+        "likes": { "type": "number", "description": "좋아요 수" },
+        "views": { "type": "number", "description": "조회수" }
+      },
+      "required": ["name", "location", "price", "status", "seller"]
+    }
+  },
+  "firestore": {
+    "/items/{itemId}": {
+      "schema": "Item",
+      "description": "물품 목록 컬렉션"
+    },
+    "/products/{productId}": {
+      "schema": "Item",
+      "description": "호환용 물품 컬렉션"
+    }
+  }
+}

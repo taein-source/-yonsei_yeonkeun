@@ -1,0 +1,13 @@
+[
+  {
+    "id": "user_sys_admin_9842",
+    "username": "sys_admin_yeonkeun_9842",
+    "password": "YK#DormAdmin!2026$Secure",
+    "name": "시스템 최고 관리자",
+    "location": "제1기숙사 A동 302호",
+    "role": "admin",
+    "avatarUrl": "/avatars/yeongeun_stand.png",
+    "createdAt": "2026-01-01T00:00:00.000Z",
+    "lastLoginAt": "2026-09-09T11:55:26.380Z"
+  }
+]

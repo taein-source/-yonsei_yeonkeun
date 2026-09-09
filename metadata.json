@@ -1,0 +1,8 @@
+{
+  "name": "연근마켓",
+  "description": "기숙사 나눔 앱",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

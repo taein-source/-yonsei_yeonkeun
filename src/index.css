@@ -1,0 +1,105 @@
+@import "tailwindcss";
+
+/* Gmarket Sans (지마켓 산스 - 연근마켓 타이틀 및 슬로건 일치 폰트) */
+@font-face {
+    font-family: 'GmarketSansBold';
+    src: url('https://fastly.jsdelivr.net/gh/projectnoonnu/noonfonts_2001@1.1/GmarketSansBold.woff') format('woff');
+    font-weight: 700;
+    font-style: normal;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: 'GmarketSansMedium';
+    src: url('https://fastly.jsdelivr.net/gh/projectnoonnu/noonfonts_2001@1.1/GmarketSansMedium.woff') format('woff');
+    font-weight: 500;
+    font-style: normal;
+    font-display: swap;
+}
+
+@font-face {
+    font-family: 'GmarketSansLight';
+    src: url('https://fastly.jsdelivr.net/gh/projectnoonnu/noonfonts_2001@1.1/GmarketSansLight.woff') format('woff');
+    font-weight: 300;
+    font-style: normal;
+    font-display: swap;
+}
+
+.font-gmarket-bold {
+    font-family: 'GmarketSansBold', sans-serif;
+}
+
+.font-gmarket-medium {
+    font-family: 'GmarketSansMedium', sans-serif;
+}
+
+.font-gmarket-light {
+    font-family: 'GmarketSansLight', sans-serif;
+}
+
+body {
+    font-family: 'Noto Sans KR', sans-serif;
+    background-color: #f8faf6;
+    margin: 0;
+    padding: 0;
+    overflow-x: hidden;
+}
+
+/* Splash Screen Animation */
+#splash-screen {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background-color: #173B2A; /* 모바일 플래시 화면 전용 딥 포레스트 그린 */
+    z-index: 9999;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    transition: opacity 0.8s ease-out, visibility 0.8s;
+}
+
+#splash-screen.fade-out {
+    opacity: 0;
+    visibility: hidden;
+}
+
+.sprout-bounce {
+    animation: sproutFloat 2s infinite ease-in-out;
+}
+
+@keyframes sproutFloat {
+    0%, 100% { transform: translateY(0px) rotate(0deg); }
+    50% { transform: translateY(-8px) rotate(3deg); }
+}
+
+/* Custom horizontal scrollbar for categories */
+.custom-horizontal-scrollbar::-webkit-scrollbar {
+    height: 6px;
+}
+.custom-horizontal-scrollbar::-webkit-scrollbar-track {
+    background: #edf2e4;
+    border-radius: 9999px;
+}
+.custom-horizontal-scrollbar::-webkit-scrollbar-thumb {
+    background: #4A5833;
+    border-radius: 9999px;
+}
+.custom-horizontal-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: #3E4C27;
+}
+.custom-horizontal-scrollbar {
+    scrollbar-width: thin;
+    scrollbar-color: #4A5833 #edf2e4;
+}
+
+/* Hide scrollbar for clean UI */
+.no-scrollbar::-webkit-scrollbar {
+    display: none;
+}
+.no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+}
