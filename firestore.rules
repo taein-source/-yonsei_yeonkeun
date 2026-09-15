@@ -7,6 +7,9 @@ service cloud.firestore {
     match /products/{productId} {
       allow read, write: if true;
     }
+    match /users/{userId} {
+      allow read, write: if true;
+    }
     match /{document=**} {
       allow read, write: if true;
     }

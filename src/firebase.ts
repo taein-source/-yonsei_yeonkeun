@@ -4,6 +4,7 @@ import {
   collection, 
   addDoc, 
   getDocs, 
+  getDoc,
   updateDoc, 
   deleteDoc,
   doc, 
@@ -809,3 +810,244 @@ export const deleteProductFromDb = async (productId: string | number, deleterNam
   const updated = locals.filter(p => String(p.id) !== String(productId));
   saveLocalProducts(updated);
 };
+
+// -------------------------------------------------------------
+// FIRESTORE USER AUTHENTICATION & MEMBERSHIP MANAGEMENT
+// -------------------------------------------------------------
+
+export interface FirestoreUser {
+  id: string;
+  username: string;
+  password?: string;
+  name: string;
+  location: string;
+  role: 'admin' | 'user';
+  avatarUrl: string;
+  createdAt: string;
+  lastLoginAt?: string;
+}
+
+// Initial admin & sample accounts to guarantee they exist in Firestore
+export const DEFAULT_SYSTEM_ACCOUNTS: FirestoreUser[] = [
+  {
+    id: "user_sys_admin_9842",
+    username: "sys_admin_yeonkeun_9842",
+    password: "YK#DormAdmin!2026$Secure",
+    name: "시스템 최고 관리자",
+    location: "제1기숙사 A동 302호",
+    role: "admin",
+    avatarUrl: "https://i.ibb.co/tTvSdxFv/samplepic2.png",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    lastLoginAt: new Date().toISOString()
+  },
+  {
+    id: "user_1789468611691_gyoee",
+    username: "terry3305",
+    password: "1234asdf!!",
+    name: "김태인",
+    location: "제1기숙사 A동 302호",
+    role: "user",
+    avatarUrl: "https://i.ibb.co/tTvSdxFv/samplepic2.png",
+    createdAt: "2026-09-15T10:36:51.691Z",
+    lastLoginAt: new Date().toISOString()
+  }
+];
+
+/**
+ * Automatically seeds default users to Firestore on load
+ */
+export const seedInitialUsersToFirestore = async () => {
+  if (!isFirebaseAvailable || !db) return;
+  try {
+    for (const acc of DEFAULT_SYSTEM_ACCOUNTS) {
+      const userRef = doc(db, "users", acc.username.toLowerCase());
+      const existing = await getDoc(userRef);
+      if (!existing.exists()) {
+        await setDoc(userRef, acc);
+      }
+    }
+  } catch (err) {
+    console.warn("Firestore user seeding note:", err);
+  }
+};
+
+// Trigger background seeding if Firebase is ready
+if (isFirebaseAvailable && db) {
+  seedInitialUsersToFirestore().catch(() => {});
+}
+
+/**
+ * Check if a username is available directly in Firestore.
+ */
+export const checkUsernameInFirestore = async (username: string): Promise<{ available: boolean; message: string }> => {
+  const clean = username.trim().toLowerCase();
+  if (!clean) {
+    return { available: false, message: "아이디를 입력해주세요." };
+  }
+
+  // 1. Direct Firestore lookup (instant, resilient across all cloud environments)
+  if (isFirebaseAvailable && db) {
+    try {
+      const userRef = doc(db, "users", clean);
+      const userSnap = await getDoc(userRef);
+      if (userSnap.exists()) {
+        return { available: false, message: "중복되는 아이디가 존재합니다. 다른 아이디를 입력해주세요." };
+      }
+      return { available: true, message: "사용 가능한 아이디입니다!" };
+    } catch (err) {
+      console.warn("Firestore checkUsername warning, falling back to API:", err);
+    }
+  }
+
+  // 2. Fallback to API if Firestore is not directly reachable
+  try {
+    const res = await fetch(getApiUrl("/api/auth/check-username"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: clean })
+    });
+    if (res.ok) {
+      const data = await res.json();
+      return {
+        available: !!data.available,
+        message: data.message || (data.available ? "사용 가능한 아이디입니다!" : "중복되는 아이디가 존재합니다.")
+      };
+    }
+  } catch {}
+
+  // 3. Fallback to default local accounts
+  const taken = DEFAULT_SYSTEM_ACCOUNTS.some(a => a.username.toLowerCase() === clean);
+  return {
+    available: !taken,
+    message: taken ? "중복되는 아이디가 존재합니다. 다른 아이디를 입력해주세요." : "사용 가능한 아이디입니다!"
+  };
+};
+
+/**
+ * Register a user directly in Firestore.
+ */
+export const registerUserInFirestore = async (userData: {
+  username: string;
+  password: string;
+  name: string;
+  location: string;
+  avatarUrl: string;
+}): Promise<{ success: boolean; user?: FirestoreUser; message?: string }> => {
+  const cleanUsername = userData.username.trim();
+  const cleanKey = cleanUsername.toLowerCase();
+
+  const newUser: FirestoreUser = {
+    id: `user_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+    username: cleanUsername,
+    password: userData.password,
+    name: userData.name.trim(),
+    location: userData.location,
+    role: "user",
+    avatarUrl: userData.avatarUrl,
+    createdAt: new Date().toISOString(),
+    lastLoginAt: new Date().toISOString()
+  };
+
+  // 1. Direct Firestore write
+  if (isFirebaseAvailable && db) {
+    try {
+      const userRef = doc(db, "users", cleanKey);
+      const snap = await getDoc(userRef);
+      if (snap.exists()) {
+        return { success: false, message: "이미 사용 중인 아이디입니다." };
+      }
+      await setDoc(userRef, newUser);
+      
+      // Also notify backend in background if available
+      fetch(getApiUrl("/api/auth/register"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(userData)
+      }).catch(() => {});
+
+      return { success: true, user: newUser };
+    } catch (err: any) {
+      console.warn("Firestore register warning, trying backend:", err);
+    }
+  }
+
+  // 2. Fallback to backend API
+  try {
+    const res = await fetch(getApiUrl("/api/auth/register"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(userData)
+    });
+    const data = await res.json();
+    return data;
+  } catch (err: any) {
+    return { success: false, message: err?.message || "회원가입 처리 중 오류가 발생했습니다." };
+  }
+};
+
+/**
+ * Login user directly via Firestore.
+ */
+export const loginUserInFirestore = async (
+  username: string,
+  password: string
+): Promise<{ success: boolean; user?: FirestoreUser; personalData?: any; message?: string }> => {
+  const cleanUsername = username.trim();
+  const cleanKey = cleanUsername.toLowerCase();
+
+  // 1. Try Firestore direct authentication
+  if (isFirebaseAvailable && db) {
+    try {
+      const userRef = doc(db, "users", cleanKey);
+      let snap = await getDoc(userRef);
+      
+      // If user not in Firestore yet, check default accounts and seed
+      if (!snap.exists()) {
+        const defaultAcc = DEFAULT_SYSTEM_ACCOUNTS.find(a => a.username.toLowerCase() === cleanKey);
+        if (defaultAcc) {
+          await setDoc(userRef, defaultAcc);
+          snap = await getDoc(userRef);
+        }
+      }
+
+      if (snap.exists()) {
+        const user = snap.data() as FirestoreUser;
+        if (user.password !== password) {
+          return { success: false, message: "비밀번호가 일치하지 않습니다." };
+        }
+        // Update last login
+        const now = new Date().toISOString();
+        updateDoc(userRef, { lastLoginAt: now }).catch(() => {});
+        const safeUser = { ...user, lastLoginAt: now };
+        delete (safeUser as any).password;
+
+        // Also notify backend in background if available
+        fetch(getApiUrl("/api/auth/login"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username, password })
+        }).catch(() => {});
+
+        return { success: true, user: safeUser };
+      } else {
+        return { success: false, message: "존재하지 않는 아이디입니다." };
+      }
+    } catch (err) {
+      console.warn("Firestore login failed, trying API fallback:", err);
+    }
+  }
+
+  // 2. Fallback to API
+  try {
+    const res = await fetch(getApiUrl("/api/auth/login"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: cleanUsername, password })
+    });
+    const data = await res.json();
+    return data;
+  } catch (err: any) {
+    return { success: false, message: err?.message || "로그인 처리 중 오류가 발생했습니다." };
+  }
+};
+

@@ -21,6 +21,22 @@
         "views": { "type": "number", "description": "조회수" }
       },
       "required": ["name", "location", "price", "status", "seller"]
+    },
+    "User": {
+      "title": "User",
+      "description": "연근마켓 회원 계정 정보",
+      "type": "object",
+      "properties": {
+        "username": { "type": "string", "description": "회원 로그인 아이디 (고유 키)" },
+        "password": { "type": "string", "description": "회원 비밀번호" },
+        "name": { "type": "string", "description": "회원 성명" },
+        "location": { "type": "string", "description": "기숙사 방 호수" },
+        "role": { "type": "string", "description": "역할 (user 또는 admin)" },
+        "avatarUrl": { "type": "string", "description": "프로필 아바타 이미지 URL" },
+        "createdAt": { "type": "string", "description": "가입 일시" },
+        "lastLoginAt": { "type": "string", "description": "최근 로그인 일시" }
+      },
+      "required": ["username", "password", "name", "role"]
     }
   },
   "firestore": {
@@ -31,6 +47,10 @@
     "/products/{productId}": {
       "schema": "Item",
       "description": "호환용 물품 컬렉션"
+    },
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "회원 계정 정보 컬렉션"
     }
   }
 }

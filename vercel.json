@@ -8,6 +8,10 @@
       "destination": "/api"
     },
     {
+      "source": "/api",
+      "destination": "/api"
+    },
+    {
       "source": "/avatars/(.*)",
       "destination": "/api"
     },

@@ -19,6 +19,9 @@ import {
   getOrUploadHomeBanner,
   getOrUploadSampleAvatars,
   saveLocalProducts,
+  checkUsernameInFirestore,
+  registerUserInFirestore,
+  loginUserInFirestore,
   Product 
 } from './firebase';
 import { compressImage } from './utils/imageCompressor';
@@ -471,7 +474,7 @@ export default function App() {
   const [fetchedLogs, setFetchedLogs] = useState<any[]>([]);
   const [logsLoading, setLogsLoading] = useState(false);
 
-  // 아이디 중복 확인 함수
+  // 아이디 중복 확인 함수 (Firebase Firestore 연동)
   const handleCheckUsername = async () => {
     const cleanUser = authForm.username.replace(/\s/g, '').trim();
     if (!cleanUser) {
@@ -482,20 +485,14 @@ export default function App() {
 
     setUsernameCheckStatus('checking');
     try {
-      const res = await fetch(getApiUrl('/api/auth/check-username'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: cleanUser }),
-      });
-      const data = await parseJsonResponse(res);
-
-      if (data.available) {
+      const result = await checkUsernameInFirestore(cleanUser);
+      if (result.available) {
         setUsernameCheckStatus('available');
         setUsernameCheckMsg('✅ 사용 가능한 아이디입니다!');
         setAuthError('');
       } else {
         setUsernameCheckStatus('taken');
-        setUsernameCheckMsg(`❌ ${data.message || '중복되는 아이디가 존재합니다.'}`);
+        setUsernameCheckMsg(`❌ ${result.message || '중복되는 아이디가 존재합니다.'}`);
       }
     } catch (err: any) {
       console.error(err);
@@ -504,7 +501,7 @@ export default function App() {
     }
   };
 
-  // 백엔드 로그인 처리
+  // 백엔드 로그인 처리 (Firebase Firestore 연동)
   const handleBackendLogin = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     setAuthError('');
@@ -518,16 +515,8 @@ export default function App() {
 
     setAuthLoading(true);
     try {
-      const res = await fetch(getApiUrl('/api/auth/login'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          username: cleanUsername,
-          password: cleanPassword,
-        }),
-      });
-      const data = await parseJsonResponse(res);
-      if (!res.ok || !data.success) {
+      const data = await loginUserInFirestore(cleanUsername, cleanPassword);
+      if (!data.success || !data.user) {
         setAuthError(data.message || '로그인에 실패했습니다.');
         setAuthLoading(false);
         return;
@@ -635,19 +624,14 @@ export default function App() {
 
     setAuthLoading(true);
     try {
-      const res = await fetch(getApiUrl('/api/auth/register'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          username: cleanUsername,
-          password: cleanPassword,
-          name: cleanName,
-          location: finalLocation,
-          avatarUrl: randomAvatar,
-        }),
+      const data = await registerUserInFirestore({
+        username: cleanUsername,
+        password: cleanPassword,
+        name: cleanName,
+        location: finalLocation,
+        avatarUrl: randomAvatar,
       });
-      const data = await parseJsonResponse(res);
-      if (!res.ok || !data.success) {
+      if (!data.success) {
         setAuthError(data.message || '회원가입에 실패했습니다.');
         setAuthLoading(false);
         return;
