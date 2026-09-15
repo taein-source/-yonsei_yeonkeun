@@ -497,10 +497,10 @@ export default function App() {
         setUsernameCheckStatus('taken');
         setUsernameCheckMsg(`❌ ${data.message || '중복되는 아이디가 존재합니다.'}`);
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
       setUsernameCheckStatus('taken');
-      setUsernameCheckMsg('아이디 중복 확인 중 오류가 발생했습니다.');
+      setUsernameCheckMsg(err?.message ? `⚠️ ${err.message}` : '아이디 중복 확인 중 오류가 발생했습니다.');
     }
   };
 
