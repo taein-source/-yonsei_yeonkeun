@@ -23,6 +23,7 @@ import {
 } from "firebase/storage";
 import firebaseConfigJson from "../firebase-applet-config.json";
 import { compressImage } from "./utils/imageCompressor";
+import { getApiUrl, getAssetUrl } from "./utils/api";
 
 // Firebase Configuration from provisioned configuration
 const firebaseConfig = {
@@ -343,7 +344,7 @@ export const uploadImageToFirebaseStorage = async (
 export const uploadImageToBackend = async (dataUrl: string, prefix = "item"): Promise<string> => {
   try {
     if (!dataUrl || !dataUrl.startsWith("data:")) return dataUrl;
-    const res = await fetch("/api/upload", {
+    const res = await fetch(getApiUrl("/api/upload"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ image: dataUrl, filename: prefix })
@@ -351,7 +352,7 @@ export const uploadImageToBackend = async (dataUrl: string, prefix = "item"): Pr
     if (res.ok) {
       const data = await res.json();
       if (data.success && data.url) {
-        return data.url;
+        return getAssetUrl(data.url);
       }
     }
   } catch (err) {
@@ -425,7 +426,7 @@ export const uploadItemImage = async (
 export const getProducts = async (callback: (products: Product[]) => void) => {
   const fetchBackendProducts = async () => {
     try {
-      const res = await fetch("/api/products");
+      const res = await fetch(getApiUrl("/api/products"));
       if (res.ok) {
         const data = await res.json();
         if (data.success && Array.isArray(data.products)) {
@@ -573,7 +574,7 @@ export const addProduct = async (productData: Omit<Product, 'id'>): Promise<Prod
 
   // 1. Send to Backend Server API first to ensure image is saved to static /uploads/ if needed
   try {
-    const res = await fetch("/api/products", {
+    const res = await fetch(getApiUrl("/api/products"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload)
@@ -642,7 +643,7 @@ export const updateProductDetails = async (productId: string | number, updatedFi
 
   // Backend server API
   try {
-    await fetch(`/api/products/${productId}`, {
+    await fetch(getApiUrl(`/api/products/${productId}`), {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(fields)
@@ -677,7 +678,7 @@ export const updateProductDetails = async (productId: string | number, updatedFi
 export const updateProductStatus = async (productId: string | number, newStatus: '나눔중' | '예약중' | '완료' | '무료') => {
   // Backend server API
   try {
-    await fetch(`/api/products/${productId}`, {
+    await fetch(getApiUrl(`/api/products/${productId}`), {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ status: newStatus })
@@ -713,7 +714,7 @@ export const updateProductLikes = async (productId: string | number, isLiking: b
 
   // Backend server API
   try {
-    await fetch(`/api/products/${productId}`, {
+    await fetch(getApiUrl(`/api/products/${productId}`), {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ likeDelta: incrementVal })
@@ -747,7 +748,7 @@ export const updateProductLikes = async (productId: string | number, isLiking: b
 export const incrementProductViews = async (productId: string | number) => {
   // Backend server API
   try {
-    await fetch(`/api/products/${productId}`, {
+    await fetch(getApiUrl(`/api/products/${productId}`), {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ viewDelta: 1 })
@@ -781,7 +782,7 @@ export const incrementProductViews = async (productId: string | number) => {
 export const deleteProductFromDb = async (productId: string | number, deleterName?: string) => {
   // Backend server API
   try {
-    await fetch(`/api/products/${productId}`, {
+    await fetch(getApiUrl(`/api/products/${productId}`), {
       method: "DELETE",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ deletedBy: deleterName || "사용자" })

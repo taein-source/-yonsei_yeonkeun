@@ -2,7 +2,6 @@ import express from "express";
 import path from "path";
 import dotenv from "dotenv";
 import fs from "fs";
-import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 
 dotenv.config();
@@ -91,9 +90,26 @@ export interface ServerChatRoom {
 }
 
 // In-Memory Data Stores with File Persistence Fallback
-const DATA_DIR = path.join(process.cwd(), ".data");
+const isVercel = !!process.env.VERCEL;
+const DATA_DIR = isVercel ? path.join("/tmp", ".data") : path.join(process.cwd(), ".data");
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+if (isVercel) {
+  const seedDir = path.join(process.cwd(), ".data");
+  if (fs.existsSync(seedDir)) {
+    try {
+      const files = fs.readdirSync(seedDir);
+      for (const file of files) {
+        const dest = path.join(DATA_DIR, file);
+        if (!fs.existsSync(dest)) {
+          fs.copyFileSync(path.join(seedDir, file), dest);
+        }
+      }
+    } catch (e) {
+      console.warn("Seed data copy to /tmp warning:", e);
+    }
+  }
 }
 
 const USERS_FILE = path.join(DATA_DIR, "users.json");
@@ -221,15 +237,27 @@ if (!fs.existsSync(CHATS_FILE)) {
   saveJSON(CHATS_FILE, chatRoomsStore);
 }
 
-async function startServer() {
+export function createApp() {
   const app = express();
-  const PORT = 3000;
 
   // Static files for user uploads
-  const UPLOADS_DIR = path.join(process.cwd(), "public/uploads");
+  const UPLOADS_DIR = isVercel ? path.join("/tmp", "uploads") : path.join(process.cwd(), "public/uploads");
   if (!fs.existsSync(UPLOADS_DIR)) {
     fs.mkdirSync(UPLOADS_DIR, { recursive: true });
   }
+
+  // CORS Middleware for Cross-Origin requests (e.g. from Vercel frontend)
+  app.use((req, res, next) => {
+    res.header("Access-Control-Allow-Origin", "*");
+    res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH");
+    res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization");
+    if (req.method === "OPTIONS") {
+      return res.sendStatus(200);
+    }
+    next();
+  });
+
+
 
   // JSON request body parser with larger limit for base64 images
   app.use(express.json({ limit: "25mb" }));
@@ -1244,8 +1272,17 @@ async function startServer() {
     }
   });
 
+  return app;
+}
+
+export const app = createApp();
+
+export async function startServer() {
+  const PORT = 3000;
+
   // Vite middleware for development vs static serve for production
   if (process.env.NODE_ENV !== "production") {
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
@@ -1264,6 +1301,10 @@ async function startServer() {
   });
 }
 
-startServer().catch((err) => {
-  console.error("Failed to start server:", err);
-});
+if (!process.env.VERCEL) {
+  startServer().catch((err) => {
+    console.error("Failed to start server:", err);
+  });
+}
+
+export default app;

@@ -22,6 +22,7 @@ import {
   Product 
 } from './firebase';
 import { compressImage } from './utils/imageCompressor';
+import { getApiUrl, parseJsonResponse, getAssetUrl } from './utils/api';
 import { YeongeunLogo } from './components/YeongeunLogo';
 import { CameraCaptureModal } from './components/CameraCaptureModal';
 import { RECOMMENDED_AVATARS, YEONGEUN_STAND_PNG, getRandomYeongeunAvatar } from './components/YeongeunAvatars';
@@ -53,6 +54,7 @@ export interface ChatPartner {
 
 export default function App() {
   const [showSplash, setShowSplash] = useState(true);
+  const [splashMounted, setSplashMounted] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [activeSearch, setActiveSearch] = useState('');
   const [showDropdown, setShowDropdown] = useState(false);
@@ -60,6 +62,9 @@ export default function App() {
   // 등록 및 뷰 상태
   const [currentView, setCurrentView] = useState<'home' | 'category' | 'chat' | 'register' | 'detail' | 'favorites' | 'mypage'>('home');
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
+
+  // 찜 랭킹 5등까지 확장 표시 여부 상태
+  const [showTop5Ranking, setShowTop5Ranking] = useState(false);
 
   // 나눔 완료 상태 변경 시 부드러운 체크 애니메이션 토스트 상태
   const [statusToastNotice, setStatusToastNotice] = useState<{ message: string; isCompleted: boolean } | null>(null);
@@ -120,7 +125,7 @@ export default function App() {
     }
 
     try {
-      const res = await fetch("/api/chats/room", {
+      const res = await fetch(getApiUrl("/api/chats/room"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -226,7 +231,7 @@ export default function App() {
     // 백엔드 서버에 실제 메시지 저장
     if (currentUser) {
       try {
-        const res = await fetch(`/api/chats/${selectedChatPartner.id}/messages`, {
+        const res = await fetch(getApiUrl(`/api/chats/${selectedChatPartner.id}/messages`), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -349,7 +354,7 @@ export default function App() {
 
     const fetchUserChatRooms = async () => {
       try {
-        const res = await fetch(`/api/chats?username=${encodeURIComponent(currentUser.username)}&name=${encodeURIComponent(currentUser.name)}`);
+        const res = await fetch(getApiUrl(`/api/chats?username=${encodeURIComponent(currentUser.username)}&name=${encodeURIComponent(currentUser.name)}`));
         if (res.ok) {
           const data = await res.json();
           if (data.success && Array.isArray(data.rooms)) {
@@ -477,12 +482,12 @@ export default function App() {
 
     setUsernameCheckStatus('checking');
     try {
-      const res = await fetch('/api/auth/check-username', {
+      const res = await fetch(getApiUrl('/api/auth/check-username'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: cleanUser }),
       });
-      const data = await res.json();
+      const data = await parseJsonResponse(res);
 
       if (data.available) {
         setUsernameCheckStatus('available');
@@ -513,7 +518,7 @@ export default function App() {
 
     setAuthLoading(true);
     try {
-      const res = await fetch('/api/auth/login', {
+      const res = await fetch(getApiUrl('/api/auth/login'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -521,7 +526,7 @@ export default function App() {
           password: cleanPassword,
         }),
       });
-      const data = await res.json();
+      const data = await parseJsonResponse(res);
       if (!res.ok || !data.success) {
         setAuthError(data.message || '로그인에 실패했습니다.');
         setAuthLoading(false);
@@ -544,7 +549,7 @@ export default function App() {
       } catch {}
 
       // 최고 관리자 대시보드 유저 목록 동기화
-      fetch('/api/users/sync-logged-in', {
+      fetch(getApiUrl('/api/users/sync-logged-in'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -574,9 +579,9 @@ export default function App() {
       setIsAuthModalOpen(false);
       setAuthForm({ username: '', password: '', confirmPassword: '', name: '', location: '제1기숙사 A동 302호' });
       alert(`🎉 ${user.name}님 로그인 완료! (${user.role === 'admin' ? '최고 관리자' : '기숙사 메이트'})`);
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
-      setAuthError('서버 통신 중 오류가 발생했습니다.');
+      setAuthError(err.message || '서버 통신 중 오류가 발생했습니다.');
     } finally {
       setAuthLoading(false);
     }
@@ -630,7 +635,7 @@ export default function App() {
 
     setAuthLoading(true);
     try {
-      const res = await fetch('/api/auth/register', {
+      const res = await fetch(getApiUrl('/api/auth/register'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -641,7 +646,7 @@ export default function App() {
           avatarUrl: randomAvatar,
         }),
       });
-      const data = await res.json();
+      const data = await parseJsonResponse(res);
       if (!res.ok || !data.success) {
         setAuthError(data.message || '회원가입에 실패했습니다.');
         setAuthLoading(false);
@@ -659,9 +664,9 @@ export default function App() {
       });
       setUsernameCheckStatus('idle');
       setUsernameCheckMsg('');
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
-      setAuthError('서버 통신 중 오류가 발생했습니다.');
+      setAuthError(err.message || '서버 통신 중 오류가 발생했습니다.');
     } finally {
       setAuthLoading(false);
     }
@@ -671,7 +676,7 @@ export default function App() {
   const handleBackendLogout = async () => {
     if (!currentUser) return;
     try {
-      await fetch('/api/auth/logout', {
+      await fetch(getApiUrl('/api/auth/logout'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -701,7 +706,7 @@ export default function App() {
   const fetchAccessLogs = async () => {
     setLogsLoading(true);
     try {
-      const res = await fetch('/api/logs?limit=100');
+      const res = await fetch(getApiUrl('/api/logs?limit=100'));
       const data = await res.json();
       if (data.success) {
         setFetchedLogs(data.logs || []);
@@ -847,7 +852,7 @@ export default function App() {
 
   const fetchAdminStats = async () => {
     try {
-      const res = await fetch('/api/admin/stats');
+      const res = await fetch(getApiUrl('/api/admin/stats'));
       if (res.ok) {
         const data = await res.json();
         if (data.success && data.stats) {
@@ -868,7 +873,7 @@ export default function App() {
       }
 
       // 백엔드 전체 회원 목록 조회 및 로그인 회원 병합
-      const usersRes = await fetch('/api/users');
+      const usersRes = await fetch(getApiUrl('/api/users'));
       if (usersRes.ok) {
         const usersData = await usersRes.json();
         if (usersData.success && Array.isArray(usersData.users)) {
@@ -1312,7 +1317,7 @@ export default function App() {
       if (saved) {
         const u = JSON.parse(saved);
         if (u && u.username) {
-          fetch('/api/users/sync-logged-in', {
+          fetch(getApiUrl('/api/users/sync-logged-in'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -1494,7 +1499,7 @@ export default function App() {
                   >
                       <div className="w-full h-24 bg-gray-50 rounded-xl mb-2 flex items-center justify-center text-gray-400 group-hover:scale-105 transition-transform overflow-hidden relative">
                           {product.image ? (
-                              <img src={product.image} alt={product.name} className="w-full h-full object-cover" />
+                              <img src={getAssetUrl(product.image)} alt={product.name} className="w-full h-full object-cover" />
                           ) : (
                               <i className={`${product.icon || 'fa-solid fa-box'} text-2xl text-[#4A5833]`}></i>
                           )}
@@ -1540,10 +1545,17 @@ export default function App() {
   );
 
 
+  const dismissSplash = () => {
+    setShowSplash(false);
+    setTimeout(() => {
+      setSplashMounted(false);
+    }, 700);
+  };
+
   useEffect(() => {
     const timer = setTimeout(() => {
-      setShowSplash(false);
-    }, 2300);
+      dismissSplash();
+    }, 1200);
     return () => clearTimeout(timer);
   }, []);
 
@@ -1609,36 +1621,38 @@ export default function App() {
       {/* ========================================== */}
       {/* 1. SPLASH SCREEN (모바일 플래시 화면) */}
       {/* ========================================== */}
-      <div 
-          id="splash-screen" 
-          onClick={() => setShowSplash(false)}
-          className={`relative overflow-hidden px-8 text-center select-none cursor-pointer bg-[#173B2A] transition-all duration-700 ${!showSplash ? 'fade-out' : ''}`}
-      >
-          {/* 중앙 메인 플래시 아트워크 (업로드된 모바일 플래시 PNG와 100% 동일한 비주얼 구성) */}
-          <div className="z-10 flex flex-col items-center justify-center animate-fade-in">
-              {/* 연근 마켓 공식 캐릭터 아트워크 */}
-              <div className="w-36 h-36 sm:w-40 sm:h-40 flex items-center justify-center mb-6 sprout-bounce">
-                  <YeongeunLogo className="w-full h-full drop-shadow-lg" rotate={0} variant="dark" />
-              </div>
+      {splashMounted && (
+        <div 
+            id="splash-screen" 
+            onClick={dismissSplash}
+            className={`relative overflow-hidden px-8 text-center select-none cursor-pointer bg-[#173B2A] transition-all duration-700 ${!showSplash ? 'fade-out' : ''}`}
+        >
+            {/* 중앙 메인 플래시 아트워크 (업로드된 모바일 플래시 PNG와 100% 동일한 비주얼 구성) */}
+            <div className="z-10 flex flex-col items-center justify-center animate-fade-in">
+                {/* 연근 마켓 공식 캐릭터 아트워크 */}
+                <div className="w-36 h-36 sm:w-40 sm:h-40 flex items-center justify-center mb-6 sprout-bounce">
+                    <YeongeunLogo className="w-full h-full drop-shadow-lg" rotate={0} variant="dark" />
+                </div>
 
-              {/* 브랜드 메인 타이틀: 연근마켓 (업로드된 이미지와 100% 동일한 Gmarket Sans 폰트) */}
-              <h1 className="text-4xl sm:text-5xl font-gmarket-bold text-white tracking-normal mb-3.5 leading-none drop-shadow-sm">
-                  연근마켓
-              </h1>
+                {/* 브랜드 메인 타이틀: 연근마켓 (업로드된 이미지와 100% 동일한 Gmarket Sans 폰트) */}
+                <h1 className="text-4xl sm:text-5xl font-gmarket-bold text-white tracking-normal mb-3.5 leading-none drop-shadow-sm">
+                    연근마켓
+                </h1>
 
-              {/* 메인 슬로건: 환경을 지키는 따뜻한 거래 (업로드된 이미지와 100% 동일한 Gmarket Sans 폰트) */}
-              <p className="text-base sm:text-lg font-gmarket-medium text-white tracking-tight opacity-95">
-                  환경을 지키는 따뜻한 거래
-              </p>
-          </div>
+                {/* 메인 슬로건: 환경을 지키는 따뜻한 거래 (업로드된 이미지와 100% 동일한 Gmarket Sans 폰트) */}
+                <p className="text-base sm:text-lg font-gmarket-medium text-white tracking-tight opacity-95">
+                    환경을 지키는 따뜻한 거래
+                </p>
+            </div>
 
-          {/* 하단 미니멀 로딩 인디케이터 (어두운 녹색 테마에 맞춘 은은한 인디케이터) */}
-          <div className="absolute bottom-10 z-10 flex flex-col items-center">
-              <div className="w-10 h-1 bg-white/20 rounded-full overflow-hidden">
-                  <div className="w-full h-full bg-white/80 animate-pulse"></div>
-              </div>
-          </div>
-      </div>
+            {/* 하단 미니멀 로딩 인디케이터 (어두운 녹색 테마에 맞춘 은은한 인디케이터) */}
+            <div className="absolute bottom-10 z-10 flex flex-col items-center">
+                <div className="w-10 h-1 bg-white/20 rounded-full overflow-hidden">
+                    <div className="w-full h-full bg-white/80 animate-pulse"></div>
+                </div>
+            </div>
+        </div>
+      )}
 
 
       {/* ========================================== */}
@@ -2115,7 +2129,7 @@ export default function App() {
 
                                       <div className="w-full h-24 bg-gray-100 rounded-xl mb-2 flex items-center justify-center text-gray-400 overflow-hidden relative">
                                           {product.image ? (
-                                              <img src={product.image} alt={product.name} className="w-full h-full object-cover" />
+                                              <img src={getAssetUrl(product.image)} alt={product.name} className="w-full h-full object-cover" />
                                           ) : (
                                               <i className={`${product.icon} text-3xl`}></i>
                                           )}
@@ -3089,7 +3103,7 @@ export default function App() {
 
                                       <div className="w-full h-24 bg-gray-100 rounded-xl mb-2 flex items-center justify-center text-gray-400 overflow-hidden relative">
                                           {product.image ? (
-                                              <img src={product.image} alt={product.name} className="w-full h-full object-cover" />
+                                              <img src={getAssetUrl(product.image)} alt={product.name} className="w-full h-full object-cover" />
                                           ) : (
                                               <i className={`${product.icon} text-3xl`}></i>
                                           )}
@@ -3253,7 +3267,7 @@ export default function App() {
 
                                               <div className="w-full h-24 bg-gray-100 rounded-lg mb-2 flex items-center justify-center text-gray-400 overflow-hidden relative">
                                                   {product.image ? (
-                                                      <img src={product.image} alt={product.name} className="w-full h-full object-cover" />
+                                                      <img src={getAssetUrl(product.image)} alt={product.name} className="w-full h-full object-cover" />
                                                   ) : (
                                                       <i className={`${product.icon} text-3xl`}></i>
                                                   )}
@@ -3337,17 +3351,33 @@ export default function App() {
                           <section>
                               <div className="flex items-center justify-between mb-3">
                                   <h2 className="font-bold text-gray-800 text-base flex items-center gap-1.5">
-                                      🔥 찜 랭킹 TOP 3
+                                      🔥 찜 랭킹 {showTop5Ranking ? 'TOP 5' : 'TOP 3'}
                                   </h2>
-                                  <span className="text-xs text-gray-400">클릭해서 상세 확인</span>
+                                  <button
+                                      type="button"
+                                      onClick={() => setShowTop5Ranking(prev => !prev)}
+                                      className="text-xs text-gray-400 hover:text-[#4A5833] hover:underline transition cursor-pointer flex items-center gap-1"
+                                      title={showTop5Ranking ? "TOP 3로 접기" : "찜 랭킹 5등까지 확인하기"}
+                                  >
+                                      <span>{showTop5Ranking ? 'TOP 3로 접기' : '클릭해서 상세 확인'}</span>
+                                      <i className={`fa-solid ${showTop5Ranking ? 'fa-chevron-up' : 'fa-chevron-right'} text-[9px]`}></i>
+                                  </button>
                               </div>
                               <div className="grid grid-cols-3 gap-2.5">
                                   {[...productList]
                                       .sort((a, b) => (b.likes || 0) - (a.likes || 0))
-                                      .slice(0, 3)
+                                      .slice(0, showTop5Ranking ? 5 : 3)
                                       .map((product, index) => {
                                           const rankLabel = `${index + 1}위`;
-                                          const rankBg = index === 0 ? 'bg-red-500' : index === 1 ? 'bg-orange-500' : 'bg-amber-500';
+                                          const rankBg = index === 0 
+                                              ? 'bg-red-500' 
+                                              : index === 1 
+                                              ? 'bg-orange-500' 
+                                              : index === 2 
+                                              ? 'bg-amber-500' 
+                                              : index === 3
+                                              ? 'bg-emerald-600'
+                                              : 'bg-blue-600';
                                           return (
                                               <div 
                                                   key={product.id}
@@ -3359,7 +3389,7 @@ export default function App() {
                                                   </span>
                                                   <div className="w-full h-16 bg-gray-100 rounded-lg mb-1.5 flex items-center justify-center text-gray-300 overflow-hidden relative">
                                                       {product.image ? (
-                                                          <img src={product.image} alt={product.name} className="w-full h-full object-cover" />
+                                                          <img src={getAssetUrl(product.image)} alt={product.name} className="w-full h-full object-cover" />
                                                       ) : (
                                                           <i className={`${product.icon} text-xl`}></i>
                                                       )}
@@ -3409,7 +3439,7 @@ export default function App() {
                                           >
                                               <div className="w-16 h-16 bg-gray-50 rounded-2xl flex items-center justify-center text-gray-400 mb-2 border border-gray-100 overflow-hidden shrink-0 shadow-2xs">
                                                   {product.image ? (
-                                                      <img src={product.image} alt={product.name} className="w-full h-full object-cover" />
+                                                      <img src={getAssetUrl(product.image)} alt={product.name} className="w-full h-full object-cover" />
                                                   ) : (
                                                       <i className={`${product.icon} text-2xl`}></i>
                                                   )}
@@ -3453,7 +3483,7 @@ export default function App() {
                                           >
                                               <div className="w-10 h-10 bg-gray-100 rounded-lg flex items-center justify-center text-gray-400 shrink-0 overflow-hidden relative">
                                                   {product.image ? (
-                                                      <img src={product.image} alt={product.name} className="w-full h-full object-cover" />
+                                                      <img src={getAssetUrl(product.image)} alt={product.name} className="w-full h-full object-cover" />
                                                   ) : (
                                                       <i className={`${product.icon} text-lg`}></i>
                                                   )}
@@ -3866,7 +3896,7 @@ export default function App() {
                           )}
                           {selectedProduct.image ? (
                               <div className="w-full h-48 rounded-2xl overflow-hidden shadow-sm border border-gray-200 bg-white relative">
-                                  <img src={selectedProduct.image} alt={selectedProduct.name} className="w-full h-full object-cover" />
+                                  <img src={getAssetUrl(selectedProduct.image)} alt={selectedProduct.name} className="w-full h-full object-cover" />
                                   <AnimatePresence>
                                       {selectedProduct.status === '완료' && (
                                           <motion.div 
@@ -4144,7 +4174,7 @@ export default function App() {
                           localStorage.setItem('yeongeun_current_user', JSON.stringify(updatedUser));
 
                           // 백엔드 영구 보관 API 호출
-                          fetch('/api/user/profile', {
+                          fetch(getApiUrl('/api/user/profile'), {
                               method: 'POST',
                               headers: { 'Content-Type': 'application/json' },
                               body: JSON.stringify({
@@ -4394,7 +4424,7 @@ export default function App() {
                                   <div className="flex items-center gap-2.5 min-w-0 flex-1">
                                       <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center text-[#4A5833] border border-gray-100 overflow-hidden shrink-0">
                                           {product.image ? (
-                                              <img src={product.image} alt={product.name} className="w-full h-full object-cover" />
+                                              <img src={getAssetUrl(product.image)} alt={product.name} className="w-full h-full object-cover" />
                                           ) : (
                                               <i className={`${product.icon || 'fa-solid fa-box'} text-lg`}></i>
                                           )}
@@ -4748,7 +4778,7 @@ export default function App() {
                                               <button
                                                   onClick={async () => {
                                                       try {
-                                                          await fetch(`/api/users/${u.id}`, { method: 'DELETE' });
+                                                          await fetch(getApiUrl(`/api/users/${u.id}`), { method: 'DELETE' });
                                                       } catch (e) {
                                                           console.warn("Failed to delete user on server:", e);
                                                       }

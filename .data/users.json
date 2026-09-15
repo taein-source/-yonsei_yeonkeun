@@ -3,11 +3,22 @@
     "id": "user_sys_admin_9842",
     "username": "sys_admin_yeonkeun_9842",
     "password": "YK#DormAdmin!2026$Secure",
-    "name": "\uc2dc\uc2a4\ud15c \ucd5c\uace0 \uad00\ub9ac\uc790",
-    "location": "\uc81c1\uae30\uc219\uc0ac A\ub3d9 302\ud638",
+    "name": "시스템 최고 관리자",
+    "location": "제1기숙사 A동 302호",
     "role": "admin",
     "avatarUrl": "https://i.ibb.co/tTvSdxFv/samplepic2.png",
     "createdAt": "2026-01-01T00:00:00.000Z",
-    "lastLoginAt": "2026-09-09T13:01:14.584Z"
+    "lastLoginAt": "2026-09-15T11:22:57.037Z"
+  },
+  {
+    "id": "user_1789468611691_gyoee",
+    "username": "terry3305",
+    "password": "1234asdf!!",
+    "name": "김태인",
+    "location": "제1기숙사 A동 302호",
+    "role": "user",
+    "avatarUrl": "https://i.ibb.co/tTvSdxFv/samplepic2.png",
+    "createdAt": "2026-09-15T10:36:51.691Z",
+    "lastLoginAt": "2026-09-15T11:05:04.907Z"
   }
 ]
