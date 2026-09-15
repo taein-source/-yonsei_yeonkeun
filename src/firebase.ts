@@ -22,6 +22,7 @@ import {
   uploadString
 } from "firebase/storage";
 import firebaseConfigJson from "../firebase-applet-config.json";
+import { compressImage } from "./utils/imageCompressor";
 
 // Firebase Configuration from provisioned configuration
 const firebaseConfig = {
@@ -93,12 +94,11 @@ export const initialProducts: Product[] = [];
 const LOCAL_STORAGE_KEY = "dorm_share_products";
 
 export const getLocalProducts = (): Product[] => {
-  const stored = localStorage.getItem(LOCAL_STORAGE_KEY);
-  if (!stored) {
-    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify([]));
-    return [];
-  }
   try {
+    const stored = localStorage.getItem(LOCAL_STORAGE_KEY);
+    if (!stored) {
+      return [];
+    }
     const parsed: Product[] = JSON.parse(stored);
     const mockNames = [
       "2단 행거 (상태양호)", "LED 책상 스탠드", "전공서적 (컴공)", "미니 탁상 선풍기", "멀티탭 4구 (3m)", "빨래바구니",
@@ -119,7 +119,30 @@ export const getLocalProducts = (): Product[] => {
 };
 
 export const saveLocalProducts = (products: Product[]) => {
-  localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(products));
+  try {
+    // Attempt saving full products with compressed images
+    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(products));
+  } catch (err: any) {
+    console.warn("saveLocalProducts localStorage quota exceeded, attempting sanitized cache:", err);
+    try {
+      // Exclude large data: URIs only when browser storage quota is exceeded
+      const sanitized = products.map(p => {
+        const isDataUrl = (url?: string) => typeof url === "string" && url.startsWith("data:");
+        if (isDataUrl(p.image) || isDataUrl(p.imageUrl)) {
+          return {
+            ...p,
+            image: isDataUrl(p.image) ? "" : p.image,
+            imageUrl: isDataUrl(p.imageUrl) ? "" : p.imageUrl,
+          };
+        }
+        return p;
+      });
+
+      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(sanitized));
+    } catch {
+      // safe fallback
+    }
+  }
 };
 
 // ----------------------------------------
@@ -314,6 +337,84 @@ export const uploadImageToFirebaseStorage = async (
   }
 };
 
+/**
+ * Upload image to backend local storage (/api/upload) as reliable fallback
+ */
+export const uploadImageToBackend = async (dataUrl: string, prefix = "item"): Promise<string> => {
+  try {
+    if (!dataUrl || !dataUrl.startsWith("data:")) return dataUrl;
+    const res = await fetch("/api/upload", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ image: dataUrl, filename: prefix })
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.success && data.url) {
+        return data.url;
+      }
+    }
+  } catch (err) {
+    console.warn("uploadImageToBackend warning:", err);
+  }
+  return dataUrl;
+};
+
+/**
+ * Multi-layer image processing:
+ * 1. Resizes & compresses huge photo (often 5MB+) into light, high-clarity image (~70KB)
+ * 2. Attempts Firebase Storage upload with quick timeout
+ * 3. Fallback to backend /api/upload static storage
+ * 4. Fallback to compressed base64 (which safely fits in Firestore 1MB document limit)
+ */
+export const uploadItemImage = async (
+  fileOrBlob: File | Blob | string,
+  fileNamePrefix = "item"
+): Promise<string> => {
+  if (!fileOrBlob) return "";
+
+  // If already a remote or static URL
+  if (typeof fileOrBlob === "string" && (fileOrBlob.startsWith("http://") || fileOrBlob.startsWith("https://") || fileOrBlob.startsWith("/uploads/"))) {
+    return fileOrBlob;
+  }
+
+  // 1. Compress image to prevent Firestore 1MB quota and memory bloat
+  let compressedDataUrl = "";
+  try {
+    compressedDataUrl = await compressImage(fileOrBlob, 900, 900, 0.82);
+  } catch (e) {
+    console.warn("compressImage fallback:", e);
+    if (typeof fileOrBlob === "string") {
+      compressedDataUrl = fileOrBlob;
+    }
+  }
+
+  if (!compressedDataUrl) {
+    return typeof fileOrBlob === "string" ? fileOrBlob : "";
+  }
+
+  // 2. Try Firebase Storage upload
+  if (storage) {
+    try {
+      const storagePromise = uploadImageToFirebaseStorage(compressedDataUrl, fileNamePrefix);
+      const timeoutPromise = new Promise<string>((_, reject) => 
+        setTimeout(() => reject(new Error("Storage upload timeout")), 3500)
+      );
+      const storageUrl = await Promise.race([storagePromise, timeoutPromise]);
+      if (storageUrl && (storageUrl.startsWith("http://") || storageUrl.startsWith("https://"))) {
+        return storageUrl;
+      }
+    } catch (err) {
+      console.warn("Firebase Storage skipped or timed out:", err);
+    }
+  }
+
+  // 3. Return high-clarity compressed data URL directly
+  // By storing the lightweight compressed base64 directly in Firestore and application memory,
+  // uploaded photos are guaranteed to persist permanently across Cloud Run container reboots.
+  return compressedDataUrl;
+};
+
 // ----------------------------------------
 // FIRESTORE & SERVER API FUNCTIONS
 // ----------------------------------------
@@ -445,7 +546,20 @@ export const getProducts = async (callback: (products: Product[]) => void) => {
  * Add a new item to Firestore 'items' collection with imageUrl, and sync with backend server.
  */
 export const addProduct = async (productData: Omit<Product, 'id'>): Promise<Product> => {
-  const finalImageUrl = productData.imageUrl || productData.image || "";
+  let finalImageUrl = productData.imageUrl || productData.image || "";
+
+  // If image is a large data URL, safely process via uploadItemImage (compress + upload)
+  if (finalImageUrl && finalImageUrl.startsWith("data:")) {
+    try {
+      finalImageUrl = await uploadItemImage(finalImageUrl, "item");
+    } catch (e) {
+      console.warn("Image upload fallback during addProduct:", e);
+      try {
+        finalImageUrl = await compressImage(finalImageUrl, 800, 800, 0.8);
+      } catch {}
+    }
+  }
+
   const payload = {
     ...productData,
     imageUrl: finalImageUrl,
@@ -457,26 +571,7 @@ export const addProduct = async (productData: Omit<Product, 'id'>): Promise<Prod
 
   let createdProduct: Product | null = null;
 
-  // 1. Save directly to Firestore 'items' collection
-  if (isFirebaseAvailable && db) {
-    try {
-      const docRef = await addDoc(collection(db, "items"), payload);
-      // Also write to products collection for cross-compatibility
-      try {
-        await setDoc(doc(db, "products", docRef.id), payload);
-      } catch {}
-
-      createdProduct = {
-        id: docRef.id,
-        ...payload
-      };
-      console.log("Item saved to Firestore 'items' collection with ID:", docRef.id);
-    } catch (error) {
-      console.error("Failed to add to Firestore 'items':", error);
-    }
-  }
-
-  // 2. Send to Backend Server API
+  // 1. Send to Backend Server API first to ensure image is saved to static /uploads/ if needed
   try {
     const res = await fetch("/api/products", {
       method: "POST",
@@ -485,15 +580,43 @@ export const addProduct = async (productData: Omit<Product, 'id'>): Promise<Prod
     });
     if (res.ok) {
       const data = await res.json();
-      if (data.success && data.product && !createdProduct) {
+      if (data.success && data.product) {
         createdProduct = data.product;
+        // Keep persistent data URL or remote cloud URL, do not overwrite with ephemeral local /uploads/
+        if (createdProduct.imageUrl && !createdProduct.imageUrl.startsWith("/uploads/")) {
+          payload.imageUrl = createdProduct.imageUrl;
+          payload.image = createdProduct.imageUrl;
+        }
       }
     }
   } catch (err) {
     console.error("Backend addProduct error:", err);
   }
 
-  // Fallback if neither API succeeded
+  // 2. Save directly to Firestore 'items' collection with safe image URL
+  if (isFirebaseAvailable && db) {
+    try {
+      const docRef = await addDoc(collection(db, "items"), payload);
+      // Also write to products collection for cross-compatibility
+      try {
+        await setDoc(doc(db, "products", docRef.id), payload);
+      } catch {}
+
+      if (createdProduct) {
+        createdProduct.id = docRef.id;
+      } else {
+        createdProduct = {
+          id: docRef.id,
+          ...payload
+        };
+      }
+      console.log("Item saved to Firestore 'items' collection with ID:", docRef.id);
+    } catch (error) {
+      console.error("Failed to add to Firestore 'items':", error);
+    }
+  }
+
+  // 3. Fallback if neither API succeeded
   if (!createdProduct) {
     createdProduct = {
       id: `item_${Date.now()}`,

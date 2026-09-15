@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { motion, AnimatePresence } from 'motion/react';
 import { 
   getProducts, 
   addProduct, 
@@ -13,11 +14,14 @@ import {
   deleteProductFromDb,
   updateProductDetails,
   uploadImageToFirebaseStorage,
+  uploadItemImage,
   getOrUploadTopEventBanner,
   getOrUploadHomeBanner,
   getOrUploadSampleAvatars,
+  saveLocalProducts,
   Product 
 } from './firebase';
+import { compressImage } from './utils/imageCompressor';
 import { YeongeunLogo } from './components/YeongeunLogo';
 import { CameraCaptureModal } from './components/CameraCaptureModal';
 import { RECOMMENDED_AVATARS, YEONGEUN_STAND_PNG, getRandomYeongeunAvatar } from './components/YeongeunAvatars';
@@ -56,6 +60,20 @@ export default function App() {
   // 등록 및 뷰 상태
   const [currentView, setCurrentView] = useState<'home' | 'category' | 'chat' | 'register' | 'detail' | 'favorites' | 'mypage'>('home');
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
+
+  // 나눔 완료 상태 변경 시 부드러운 체크 애니메이션 토스트 상태
+  const [statusToastNotice, setStatusToastNotice] = useState<{ message: string; isCompleted: boolean } | null>(null);
+  const statusToastTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  const triggerStatusToast = (message: string, isCompleted: boolean = false) => {
+    if (statusToastTimerRef.current) {
+      clearTimeout(statusToastTimerRef.current);
+    }
+    setStatusToastNotice({ message, isCompleted });
+    statusToastTimerRef.current = setTimeout(() => {
+      setStatusToastNotice(null);
+    }, 2500);
+  };
 
   // 실시간 1:1 채팅 대화 상대 및 메시지 목록 상태
   const [chatPartners, setChatPartners] = useState<ChatPartner[]>([]);
@@ -126,9 +144,8 @@ export default function App() {
         if (data.success && data.room) {
           const room = data.room;
           const counterpart = room.participants.find((p: any) => 
-            (p.username && p.username.trim().toLowerCase() !== currentUser.username.trim().toLowerCase()) ||
-            (p.name && !p.name.trim().includes(currentUser.name.trim()))
-          ) || room.participants[1] || room.participants[0];
+            p.username && p.username.trim().toLowerCase() !== currentUser.username.trim().toLowerCase()
+          ) || room.participants.find((p: any) => p.name !== currentUser.name) || room.participants[1] || room.participants[0];
 
           const partnerObj: ChatPartner = {
             id: room.id,
@@ -144,7 +161,7 @@ export default function App() {
             mannerTemp: 36.5,
             messages: (room.messages || []).map((m: any) => ({
               id: m.id,
-              sender: (m.senderUsername === currentUser.username || m.senderName === currentUser.name) ? 'me' : 'partner',
+              sender: (m.senderUsername && m.senderUsername.trim().toLowerCase() === currentUser.username.trim().toLowerCase()) ? 'me' : 'partner',
               text: m.text,
               timestamp: m.timestamp,
               imageUrl: m.imageUrl
@@ -157,6 +174,15 @@ export default function App() {
             return [partnerObj, ...filtered];
           });
           setCurrentView('chat');
+          return;
+        } else if (!data.success && data.message) {
+          alert(data.message);
+          return;
+        }
+      } else {
+        const errData = await res.json().catch(() => ({}));
+        if (errData.message) {
+          alert(errData.message);
           return;
         }
       }
@@ -200,7 +226,7 @@ export default function App() {
     // 백엔드 서버에 실제 메시지 저장
     if (currentUser) {
       try {
-        await fetch(`/api/chats/${selectedChatPartner.id}/messages`, {
+        const res = await fetch(`/api/chats/${selectedChatPartner.id}/messages`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -210,6 +236,13 @@ export default function App() {
             imageUrl: imgToSend || undefined
           })
         });
+
+        if (!res.ok) {
+          const errData = await res.json().catch(() => ({}));
+          if (res.status === 403) {
+            alert(errData.message || "해당 대화방의 참여자만 메시지를 전송할 수 있습니다.");
+          }
+        }
       } catch (err) {
         console.error("Failed to send chat message:", err);
       }
@@ -322,13 +355,12 @@ export default function App() {
           if (data.success && Array.isArray(data.rooms)) {
             const partners: ChatPartner[] = data.rooms.map((room: any) => {
               const counterpart = room.participants.find((p: any) => 
-                (p.username && p.username.trim().toLowerCase() !== currentUser.username.trim().toLowerCase()) ||
-                (p.name && !p.name.trim().includes(currentUser.name.trim()))
-              ) || room.participants[0] || { name: '상대방', location: '기숙사', avatarUrl: '' };
+                p.username && p.username.trim().toLowerCase() !== currentUser.username.trim().toLowerCase()
+              ) || room.participants.find((p: any) => p.name !== currentUser.name) || room.participants[0] || { name: '상대방', location: '기숙사', avatarUrl: '' };
 
               const parsedMessages = (room.messages || []).map((m: any) => ({
                 id: m.id,
-                sender: (m.senderUsername === currentUser.username || m.senderName === currentUser.name) ? 'me' : 'partner',
+                sender: (m.senderUsername && m.senderUsername.trim().toLowerCase() === currentUser.username.trim().toLowerCase()) ? 'me' : 'partner',
                 text: m.text,
                 timestamp: m.timestamp,
                 imageUrl: m.imageUrl
@@ -500,6 +532,28 @@ export default function App() {
       const user = data.user;
       setCurrentUser(user);
       localStorage.setItem('yeongeun_current_user', JSON.stringify(user));
+
+      // 로그인한 회원 이력에 추가 (최고 관리자 대시보드 등록 유저 목록 반영)
+      try {
+        const hist = JSON.parse(localStorage.getItem('yeongeun_logged_in_history') || '[]');
+        const updatedHist = [
+          { ...user, lastLoginAt: new Date().toISOString() },
+          ...hist.filter((h: any) => h.username !== user.username)
+        ];
+        localStorage.setItem('yeongeun_logged_in_history', JSON.stringify(updatedHist));
+      } catch {}
+
+      // 최고 관리자 대시보드 유저 목록 동기화
+      fetch('/api/users/sync-logged-in', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...user,
+          lastLoginAt: new Date().toISOString()
+        })
+      }).then(() => {
+        fetchAdminStats();
+      }).catch(() => {});
 
       // userInfo 동기화
       setUserInfo(prev => ({
@@ -673,34 +727,58 @@ export default function App() {
   const [cameraTarget, setCameraTarget] = useState<'register' | 'editProduct' | 'editProfile'>('register');
 
   const handleCameraCapture = async (imageDataUrl: string) => {
+    if (!imageDataUrl) return;
+
     if (cameraTarget === 'register') {
-      setIsUploadingImage(true);
+      // 카메라로 찍은 사진을 선명하고 가벼운 최적 해상도로 즉시 압축 반영
+      let compressed = imageDataUrl;
       try {
-        const downloadUrl = await uploadImageToFirebaseStorage(imageDataUrl, "item_cam");
-        setUploadedImage(downloadUrl);
+        compressed = await compressImage(imageDataUrl, 900, 900, 0.82);
+      } catch (e) {
+        console.warn("Camera image compression fallback:", e);
+      }
+      setUploadedImage(compressed);
+      setIsUploadingImage(false);
+
+      // 백그라운드 스토리지/백엔드 업로드 시도
+      try {
+        const uploadedUrl = await uploadItemImage(compressed, "item_cam");
+        if (uploadedUrl) {
+          setUploadedImage(uploadedUrl);
+        }
       } catch (err) {
         console.warn("Storage upload fallback for camera capture:", err);
-        setUploadedImage(imageDataUrl);
-      } finally {
-        setIsUploadingImage(false);
       }
     } else if (cameraTarget === 'editProduct') {
-      setIsUploadingImage(true);
+      let compressed = imageDataUrl;
       try {
-        const downloadUrl = await uploadImageToFirebaseStorage(imageDataUrl, "item_edit_cam");
-        setEditProdImage(downloadUrl);
+        compressed = await compressImage(imageDataUrl, 900, 900, 0.82);
+      } catch (e) {
+        console.warn("Edit camera compression fallback:", e);
+      }
+      setEditProdImage(compressed);
+      setIsUploadingImage(false);
+      try {
+        const uploadedUrl = await uploadItemImage(compressed, "item_edit_cam");
+        if (uploadedUrl) {
+          setEditProdImage(uploadedUrl);
+        }
       } catch (err) {
         console.warn("Storage upload fallback for edit camera capture:", err);
-        setEditProdImage(imageDataUrl);
-      } finally {
-        setIsUploadingImage(false);
       }
     } else if (cameraTarget === 'editProfile') {
+      let compressed = imageDataUrl;
       try {
-        const downloadUrl = await uploadImageToFirebaseStorage(imageDataUrl, "avatar_cam");
-        setEditAvatarUrl(downloadUrl);
+        compressed = await compressImage(imageDataUrl, 400, 400, 0.85);
+      } catch {}
+      setEditAvatarUrl(compressed);
+      try {
+        const uploadedUrl = await uploadItemImage(compressed, "avatar_cam");
+        if (uploadedUrl) {
+          setEditAvatarUrl(uploadedUrl);
+        }
       } catch {
-        setEditAvatarUrl(imageDataUrl);
+        // 이미 imageDataUrl 설정됨
       }
     }
   };
@@ -789,12 +867,48 @@ export default function App() {
         }
       }
 
-      // 백엔드 전체 회원 목록 조회
+      // 백엔드 전체 회원 목록 조회 및 로그인 회원 병합
       const usersRes = await fetch('/api/users');
       if (usersRes.ok) {
         const usersData = await usersRes.json();
         if (usersData.success && Array.isArray(usersData.users)) {
-          const formattedUsers = usersData.users
+          const userList = [...usersData.users];
+
+          // 로컬 스토리지에 저장된 로그인 회원 정보(현재 로그인 유저 및 로그인 이력)도 누락 없이 병합
+          try {
+            const savedCurrentUser = localStorage.getItem('yeongeun_current_user');
+            if (savedCurrentUser) {
+              const parsed = JSON.parse(savedCurrentUser);
+              if (parsed && parsed.username) {
+                const exists = userList.some((u: any) => u.username === parsed.username || u.id === parsed.id);
+                if (!exists) {
+                  userList.push({
+                    id: parsed.id || `u_${Date.now()}`,
+                    username: parsed.username,
+                    name: parsed.name || '회원',
+                    location: parsed.location || '제1기숙사 A동 302호',
+                    role: parsed.role || 'user',
+                    lastLoginAt: new Date().toISOString(),
+                    avatarUrl: parsed.avatarUrl
+                  });
+                }
+              }
+            }
+
+            const savedHist = localStorage.getItem('yeongeun_logged_in_history');
+            if (savedHist) {
+              const parsedHist = JSON.parse(savedHist);
+              if (Array.isArray(parsedHist)) {
+                parsedHist.forEach((h: any) => {
+                  if (h && h.username && !userList.some((u: any) => u.username === h.username || u.id === h.id)) {
+                    userList.push(h);
+                  }
+                });
+              }
+            }
+          } catch {}
+
+          const formattedUsers = userList
             .filter((u: any) => !u.username?.startsWith('testrandomavatar') && !u.name?.includes('테스트유저'))
             .map((u: any, idx: number) => {
             const isAdmin = u.role === 'admin' || u.username === 'sys_admin_yeonkeun_9842';
@@ -862,28 +976,32 @@ export default function App() {
     callback();
   };
 
-  // 내가 등록한 물품인지 여부 판별 헬퍼 (로그인 계정 username, 이름, 등록자명 일치 여부 포괄)
+  // 내가 등록한 물품인지 여부 판별 헬퍼 (로그인 계정 username, 이름 일치 여부 정밀 판별)
   const isMyProduct = (product: Product | null | undefined): boolean => {
     if (!product) return false;
     if (currentUser) {
-      if (product.sellerUsername && currentUser.username &&
-          product.sellerUsername.trim().toLowerCase() === currentUser.username.trim().toLowerCase()) {
-        return true;
+      if (product.sellerUsername && currentUser.username) {
+        return product.sellerUsername.trim().toLowerCase() === currentUser.username.trim().toLowerCase();
       }
-      if (product.seller && (
-        product.seller.includes(currentUser.name) || 
-        product.seller.includes(currentUser.username)
-      )) {
-        return true;
+      if (product.seller) {
+        const sellerClean = product.seller.replace(/\(.*?\)/g, '').trim();
+        if (sellerClean && currentUser.name && sellerClean === currentUser.name.trim()) {
+          return true;
+        }
+        if (currentUser.username && product.seller.includes(currentUser.username)) {
+          return true;
+        }
       }
     }
-    if (userInfo?.name && product.seller && product.seller.includes(userInfo.name)) {
-      return true;
+    if (userInfo?.name && product.seller) {
+      const sellerClean = product.seller.replace(/\(.*?\)/g, '').trim();
+      if (sellerClean === userInfo.name.trim()) {
+        return true;
+      }
     }
     if (product.seller && (
-      product.seller.includes('나') || 
-      product.seller.includes('본인') ||
-      product.seller === '나'
+      product.seller.trim() === '나' || 
+      product.seller.trim() === '본인'
     )) {
       return true;
     }
@@ -957,29 +1075,49 @@ export default function App() {
     }
   };
 
-  // 관리자 전용 유저 목록 데이터 (예시 팝업과 동일)
-  const [adminUsers, setAdminUsers] = useState([
-    {
-      id: 'u1',
-      name: '최고 관리자',
-      handle: '@sys_admin_yeonkeun_9842',
-      role: '관리자',
-      room: '관리실 (A동 101호)',
-      lastLogin: '8. 1. 오전 12:31',
-      avatarBg: 'bg-[#FEF3C7] text-amber-700',
-      avatarIcon: '👑',
-    },
-    {
-      id: 'u2',
-      name: '나는야개발자',
-      handle: '@jongho061026',
-      role: '일반 유저',
-      room: '제 2 기숙사 E 동 717 호',
-      lastLogin: '8. 1. 오전 12:26',
-      avatarBg: 'bg-[#D1FAE5] text-emerald-700',
-      avatarIcon: '👤',
-    },
-  ]);
+  // 관리자 전용 유저 목록 데이터 (로그인한 회원 자동 반영)
+  const [adminUsers, setAdminUsers] = useState<Array<{
+    id: string;
+    name: string;
+    handle: string;
+    role: string;
+    room: string;
+    lastLogin: string;
+    avatarBg: string;
+    avatarIcon: string;
+  }>>(() => {
+    const list = [
+      {
+        id: 'u1',
+        name: '최고 관리자',
+        handle: '@sys_admin_yeonkeun_9842',
+        role: '관리자',
+        room: '관리실 (A동 101호)',
+        lastLogin: '최근 접속',
+        avatarBg: 'bg-[#FEF3C7] text-amber-700',
+        avatarIcon: '👑',
+      },
+    ];
+    try {
+      const saved = localStorage.getItem('yeongeun_current_user');
+      if (saved) {
+        const u = JSON.parse(saved);
+        if (u && u.username && u.username !== 'sys_admin_yeonkeun_9842') {
+          list.push({
+            id: u.id || 'u_cur',
+            name: u.name || '회원',
+            handle: u.username.startsWith('@') ? u.username : `@${u.username}`,
+            role: u.role === 'admin' ? '관리자' : '일반 유저',
+            room: u.location || '제1기숙사 A동 302호',
+            lastLogin: '방금 전 로그인',
+            avatarBg: u.role === 'admin' ? 'bg-[#FEF3C7] text-amber-700' : 'bg-[#D1FAE5] text-emerald-700',
+            avatarIcon: u.role === 'admin' ? '👑' : '👤',
+          });
+        }
+      }
+    } catch {}
+    return list;
+  });
 
   // 관리자 백엔드 축적 로그 데이터 (12건)
   const [adminLogs, setAdminLogs] = useState([
@@ -1103,12 +1241,20 @@ export default function App() {
 
   // 찜 상태 변화 시 localStorage에 보관
   useEffect(() => {
-    localStorage.setItem('favorited_ids', JSON.stringify(favoritedIds));
+    try {
+      localStorage.setItem('favorited_ids', JSON.stringify(favoritedIds));
+    } catch {
+      // ignore storage quota errors
+    }
   }, [favoritedIds]);
 
   // 최근 본 상품 상태 변화 시 localStorage에 보관
   useEffect(() => {
-    localStorage.setItem('recently_viewed_ids', JSON.stringify(recentlyViewedIds));
+    try {
+      localStorage.setItem('recently_viewed_ids', JSON.stringify(recentlyViewedIds));
+    } catch {
+      // ignore storage quota errors
+    }
   }, [recentlyViewedIds]);
 
   // Firestore 실시간 목록 바인딩 및 기본 물품 정리
@@ -1126,7 +1272,7 @@ export default function App() {
             !p.name?.includes('멀티탭')
           );
           if (cleaned.length !== parsed.length) {
-            localStorage.setItem('dorm_share_products', JSON.stringify(cleaned));
+            saveLocalProducts(cleaned);
           }
         }
       }
@@ -1157,6 +1303,28 @@ export default function App() {
         unsubscribeFn();
       }
     };
+  }, []);
+
+  // 로그인된 유저 세션 서버 동기화 및 관리자 대시보드 반영
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('yeongeun_current_user');
+      if (saved) {
+        const u = JSON.parse(saved);
+        if (u && u.username) {
+          fetch('/api/users/sync-logged-in', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              ...u,
+              lastLoginAt: new Date().toISOString()
+            })
+          }).then(() => {
+            fetchAdminStats();
+          }).catch(() => {});
+        }
+      }
+    } catch {}
   }, []);
 
   const allProductNames = productList.map(product => product.name);
@@ -1234,9 +1402,10 @@ export default function App() {
         (searchLower.includes('책') || searchLower.includes('교재') || searchLower.includes('도서')) && (prodCat.includes('책') || prodCat.includes('교재') || prodCat.includes('도서')) ||
         (searchLower.includes('욕실') || searchLower.includes('샤워') || searchLower.includes('세면')) && (prodCat.includes('욕실') || prodCat.includes('세면') || prodCat.includes('비누')) ||
         (searchLower.includes('생활') || searchLower.includes('가전') || searchLower.includes('전자')) && (prodCat.includes('생활') || prodCat.includes('전자') || prodCat.includes('가전')) ||
-        (searchLower.includes('주방') || searchLower.includes('식기') || searchLower.includes('요리')) && (prodCat.includes('주방') || prodCat.includes('식기') || prodCat.includes('요리') || prodCat.includes('음식')) ||
+        (searchLower.includes('주방') || searchLower.includes('식기') || searchLower.includes('요리')) && (prodCat.includes('주방') || prodCat.includes('식기') || prodCat.includes('요리')) ||
         (searchLower.includes('문구') || searchLower.includes('필기') || searchLower.includes('노트')) && (prodCat.includes('문구') || prodCat.includes('필기')) ||
-        (searchLower.includes('의류') || searchLower.includes('옷') || searchLower.includes('패션')) && (prodCat.includes('의류') || prodCat.includes('패션'))
+        (searchLower.includes('의류') || searchLower.includes('옷') || searchLower.includes('패션')) && (prodCat.includes('의류') || prodCat.includes('패션')) ||
+        (searchLower.includes('음식') || searchLower.includes('식품') || searchLower.includes('간식') || searchLower.includes('먹거리')) && (prodCat.includes('음식') || prodCat.includes('식품'))
       ) {
         categoryMatch = true;
       }
@@ -1323,21 +1492,38 @@ export default function App() {
                       onClick={() => openProductDetail(product)}
                       className="bg-white p-3 rounded-2xl border border-gray-100 shadow-xs hover:shadow-md hover:border-[#4A5833]/30 transition-all cursor-pointer flex flex-col justify-between relative group active:scale-[0.98]"
                   >
-                      <div className="w-full h-24 bg-gray-50 rounded-xl mb-2 flex items-center justify-center text-gray-400 group-hover:scale-105 transition-transform overflow-hidden">
+                      <div className="w-full h-24 bg-gray-50 rounded-xl mb-2 flex items-center justify-center text-gray-400 group-hover:scale-105 transition-transform overflow-hidden relative">
                           {product.image ? (
                               <img src={product.image} alt={product.name} className="w-full h-full object-cover" />
                           ) : (
                               <i className={`${product.icon || 'fa-solid fa-box'} text-2xl text-[#4A5833]`}></i>
                           )}
+                          {product.status === '완료' && (
+                              <div className="absolute inset-0 bg-black/55 backdrop-blur-[1px] flex items-center justify-center">
+                                  <span className="text-white text-[11px] font-black bg-black/75 px-2.5 py-1 rounded-lg border border-white/40 shadow-sm flex items-center gap-1">
+                                      <motion.i 
+                                          initial={{ scale: 0, rotate: -45 }}
+                                          animate={{ scale: [0, 1.35, 1], rotate: 0 }}
+                                          transition={{ duration: 0.35, ease: "easeOut" }}
+                                          className="fa-solid fa-circle-check text-emerald-400 text-[10px]"
+                                      />
+                                      나눔 완료
+                                  </span>
+                              </div>
+                          )}
                       </div>
 
                       <div>
-                          <h4 className="text-xs font-bold text-gray-800 truncate mb-0.5">{product.name}</h4>
+                          <h4 className={`text-xs font-bold truncate mb-0.5 ${product.status === '완료' ? 'text-gray-400 line-through' : 'text-gray-800'}`}>{product.name}</h4>
                           <p className="text-[10px] text-gray-400 truncate mb-1.5">{product.location}</p>
                           <div className="flex items-center justify-between pt-1.5 border-t border-gray-50">
                               <span className="text-xs font-black text-[#4A5833]">{product.price}</span>
-                              <span className="text-[9px] font-bold text-gray-500 bg-gray-100 px-1.5 py-0.5 rounded">
-                                  {product.category || '추천'}
+                              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
+                                  product.status === '완료'
+                                      ? 'text-gray-600 bg-gray-200 font-black'
+                                      : 'text-gray-500 bg-gray-100'
+                              }`}>
+                                  {product.status === '완료' ? '나눔 완료' : (product.category || '추천')}
                               </span>
                           </div>
                       </div>
@@ -1411,7 +1597,7 @@ export default function App() {
   };
 
   const getProductStatusLabel = (product: Product) => {
-    if (product.status === '완료') return '완료';
+    if (product.status === '완료') return '나눔 완료';
     if (product.status === '무료' || product.price.includes('무료')) return '무료';
     if (product.status === '나눔중') return product.price;
     return product.status;
@@ -1803,7 +1989,7 @@ export default function App() {
                               className="bg-gray-50/90 hover:bg-gray-100/80 p-3 rounded-2xl text-center border border-gray-100 transition cursor-pointer active:scale-95 flex flex-col items-center justify-center min-h-[64px]"
                           >
                               <div className="text-base font-black text-orange-600 mb-0.5">
-                                  {productList.filter(p => p.status === '완료').length}
+                                  {productList.filter(p => isMyProduct(p) && p.status === '완료').length}
                               </div>
                               <div className="text-[10px] font-bold text-gray-500">완료한 나눔/거래</div>
                           </div>
@@ -1927,19 +2113,31 @@ export default function App() {
                                           <i className="fa-solid fa-heart text-xs"></i>
                                       </button>
 
-                                      <div className="w-full h-24 bg-gray-100 rounded-xl mb-2 flex items-center justify-center text-gray-400 overflow-hidden">
+                                      <div className="w-full h-24 bg-gray-100 rounded-xl mb-2 flex items-center justify-center text-gray-400 overflow-hidden relative">
                                           {product.image ? (
                                               <img src={product.image} alt={product.name} className="w-full h-full object-cover" />
                                           ) : (
                                               <i className={`${product.icon} text-3xl`}></i>
                                           )}
+                                          {product.status === '완료' && (
+                                              <div className="absolute inset-0 bg-black/55 backdrop-blur-[1px] flex items-center justify-center">
+                                                  <span className="text-white text-[11px] font-black bg-black/75 px-2.5 py-1 rounded-lg border border-white/40 shadow-sm flex items-center gap-1">
+                                                      <i className="fa-solid fa-circle-check text-emerald-400 text-[10px]"></i>
+                                                      나눔 완료
+                                                  </span>
+                                              </div>
+                                          )}
                                       </div>
                                       <div>
-                                          <h4 className="text-xs font-bold text-gray-800 truncate">{product.name}</h4>
+                                          <h4 className={`text-xs font-bold truncate ${product.status === '완료' ? 'text-gray-400 line-through' : 'text-gray-800'}`}>{product.name}</h4>
                                           <p className="text-[10px] text-gray-400 mt-0.5">{product.location}</p>
                                           <div className="flex items-center justify-between mt-2 pt-2 border-t border-gray-50">
                                               <span className="text-xs font-black text-[#4A5833]">{product.price}</span>
-                                              <span className="text-[9px] font-bold text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded-full">
+                                              <span className={`text-[9px] font-black px-1.5 py-0.5 rounded-full ${
+                                                  product.status === '완료'
+                                                      ? 'text-gray-600 bg-gray-200'
+                                                      : 'text-emerald-600 bg-emerald-50'
+                                              }`}>
                                                   {getProductStatusLabel(product)}
                                               </span>
                                           </div>
@@ -2342,14 +2540,23 @@ export default function App() {
                           finalPrice = selectedPriceOption;
                       }
 
+                      let finalImageUrl = uploadedImage || undefined;
+                      if (finalImageUrl && finalImageUrl.startsWith('data:')) {
+                          try {
+                              finalImageUrl = await compressImage(finalImageUrl, 900, 900, 0.82);
+                          } catch (err) {
+                              console.warn("Pre-submit compression fallback:", err);
+                          }
+                      }
+
                       const productData = {
                           name: registerName.trim(),
                           category: registerCategory,
                           location: registerLocation.trim() || currentUser.location || 'A동 로비',
                           price: finalPrice,
                           icon: registerIcon || CATEGORY_ICON_MAP[registerCategory] || 'fa-solid fa-box',
-                          imageUrl: uploadedImage || undefined,
-                          image: uploadedImage || undefined,
+                          imageUrl: finalImageUrl,
+                          image: finalImageUrl,
                           status: (finalPrice.includes('무료') || finalPrice.includes('나눔') ? '무료' : '나눔중') as any,
                           date: new Date().toISOString().split('T')[0],
                           seller: `${currentUser.name} (${currentUser.location || '기숙사'})`,
@@ -2360,29 +2567,38 @@ export default function App() {
                           views: 0
                       };
 
-                      const createdProduct = await addProduct(productData);
+                      try {
+                          const createdProduct = await addProduct(productData);
 
-                      if (createdProduct) {
-                          setProductList(prev => [createdProduct, ...prev.filter(p => String(p.id) !== String(createdProduct.id))]);
+                          if (createdProduct) {
+                              setProductList(prev => [createdProduct, ...prev.filter(p => String(p.id) !== String(createdProduct.id))]);
+                          }
+
+                          // 알림 생성
+                          const newNotif = {
+                              id: `notif_reg_${Date.now()}`,
+                              title: `📦 물품 등록 완료`,
+                              message: `${productData.name} 이 정상적으로 등록되었습니다.`,
+                              time: '방금 전',
+                              unread: true,
+                              type: 'register' as const,
+                              icon: 'fa-solid fa-box',
+                              iconBg: 'bg-[#EAF2DA] text-[#4A5833]',
+                          };
+                          setNotifications(prev => [newNotif, ...prev]);
+
+                          // Refresh product list safely without erasing the freshly created item
+                          getProducts((products) => {
+                              setProductList(prev => {
+                                  const existingIds = new Set(products.map(p => String(p.id)));
+                                  const recentUnsynced = prev.filter(p => !existingIds.has(String(p.id)));
+                                  return [...recentUnsynced, ...products];
+                              });
+                          });
+                      } catch (regErr) {
+                          console.error("Product registration error:", regErr);
+                          alert("물품 등록 처리 중 오류가 발생했습니다. 다시 시도해주세요.");
                       }
-
-                      // 알림 생성
-                      const newNotif = {
-                          id: `notif_reg_${Date.now()}`,
-                          title: `📦 물품 등록 완료`,
-                          message: `${productData.name} 이 정상적으로 등록되었습니다.`,
-                          time: '방금 전',
-                          unread: true,
-                          type: 'register' as const,
-                          icon: 'fa-solid fa-box',
-                          iconBg: 'bg-[#EAF2DA] text-[#4A5833]',
-                      };
-                      setNotifications(prev => [newNotif, ...prev]);
-
-                      // Refresh product list from server asynchronously
-                      getProducts((products) => {
-                          setProductList(products);
-                      });
                       
                       // 검색어 및 등록 폼 상태 초기화
                       setActiveSearch('');
@@ -2407,7 +2623,7 @@ export default function App() {
                           <div className="flex items-center justify-between">
                               <label className="block text-xs font-black text-[#3E4C27] flex items-center gap-1.5">
                                   <i className="fa-solid fa-camera text-sm text-[#4A5833]"></i>
-                                  <span>물품 사진 등록 (Firebase Storage 원본 업로드)</span>
+                                  <span>물품 사진 등록</span>
                               </label>
                               <span className="text-[10px] font-semibold text-gray-500">
                                   (선택)
@@ -2418,8 +2634,8 @@ export default function App() {
                           {isUploadingImage ? (
                               <div className="flex flex-col items-center justify-center p-6 bg-white border-2 border-dashed border-[#4A5833] rounded-2xl shadow-xs animate-pulse">
                                   <div className="w-8 h-8 border-3 border-[#4A5833] border-t-transparent rounded-full animate-spin mb-2"></div>
-                                  <span className="text-xs font-black text-[#4A5833]">Firebase Storage에 원본 사진 업로드 중...</span>
-                                  <span className="text-[10px] text-gray-500 mt-0.5">AI 재가공 없이 원본 파일 그대로 업로드됩니다</span>
+                                  <span className="text-xs font-black text-[#4A5833]">사진 등록 중...</span>
+                                  <span className="text-[10px] text-gray-500 mt-0.5">선택하신 사진을 불러오고 있습니다</span>
                               </div>
                           ) : uploadedImage ? (
                               <div className="relative rounded-2xl overflow-hidden border-2 border-[#4A5833] bg-white group shadow-sm">
@@ -2466,7 +2682,7 @@ export default function App() {
                                       <span className="text-[10px] text-gray-500 font-medium">카메라로 원본 촬영</span>
                                   </button>
 
-                                  {/* 갤러리/파일 첨부 버튼 (Firebase Storage 직접 업로드) */}
+                                  {/* 갤러리/파일 첨부 버튼 */}
                                   <label 
                                       className="flex flex-col items-center justify-center p-3.5 bg-white border-2 border-dashed border-gray-300 hover:border-[#4A5833] hover:bg-gray-50 text-gray-700 rounded-2xl transition cursor-pointer active:scale-98 shadow-2xs group"
                                   >
@@ -2477,19 +2693,31 @@ export default function App() {
                                           onChange={async (e) => {
                                               const file = e.target.files?.[0];
                                               if (file) {
-                                                  setIsUploadingImage(true);
+                                                  // 1. 선택 즉시 고화질 경량화 압축하여 화면에 지연 없이 표시
                                                   try {
-                                                      const downloadUrl = await uploadImageToFirebaseStorage(file, "item");
-                                                      setUploadedImage(downloadUrl);
-                                                  } catch (err) {
-                                                      console.error("Firebase Storage upload error, falling back:", err);
+                                                      const compressed = await compressImage(file, 900, 900, 0.82);
+                                                      setUploadedImage(compressed);
+                                                      setIsUploadingImage(false);
+
+                                                      // 2. 백그라운드 스토리지/서버 업로드 시도
+                                                      try {
+                                                          const uploadedUrl = await uploadItemImage(compressed, "item_album");
+                                                          if (uploadedUrl) {
+                                                              setUploadedImage(uploadedUrl);
+                                                          }
+                                                      } catch (uploadErr) {
+                                                          console.warn("Storage upload fallback for album file:", uploadErr);
+                                                      }
+                                                  } catch (readErr) {
+                                                      console.warn("File compression fallback:", readErr);
                                                       const reader = new FileReader();
-                                                      reader.onloadend = () => {
-                                                          setUploadedImage(reader.result as string);
+                                                      reader.onload = (uploadEvt) => {
+                                                          if (uploadEvt.target?.result) {
+                                                              setUploadedImage(uploadEvt.target.result as string);
+                                                              setIsUploadingImage(false);
+                                                          }
                                                       };
                                                       reader.readAsDataURL(file);
-                                                  } finally {
-                                                      setIsUploadingImage(false);
                                                   }
                                               }
                                           }}
@@ -2498,7 +2726,7 @@ export default function App() {
                                           <i className="fa-solid fa-image"></i>
                                       </div>
                                       <span className="text-xs font-black">앨범에서 파일 선택</span>
-                                      <span className="text-[10px] text-gray-500 font-medium">원본 사진 Storage 업로드</span>
+                                      <span className="text-[10px] text-gray-500 font-medium">사진 파일 첨부</span>
                                   </label>
                               </div>
                           )}
@@ -2859,11 +3087,19 @@ export default function App() {
                                           <i className="fa-solid fa-heart text-xs"></i>
                                       </button>
 
-                                      <div className="w-full h-24 bg-gray-100 rounded-xl mb-2 flex items-center justify-center text-gray-400 overflow-hidden">
+                                      <div className="w-full h-24 bg-gray-100 rounded-xl mb-2 flex items-center justify-center text-gray-400 overflow-hidden relative">
                                           {product.image ? (
                                               <img src={product.image} alt={product.name} className="w-full h-full object-cover" />
                                           ) : (
                                               <i className={`${product.icon} text-3xl`}></i>
+                                          )}
+                                          {product.status === '완료' && (
+                                              <div className="absolute inset-0 bg-black/55 backdrop-blur-[1px] flex items-center justify-center">
+                                                  <span className="text-white text-[11px] font-black bg-black/75 px-2.5 py-1 rounded-lg border border-white/40 shadow-sm flex items-center gap-1">
+                                                      <i className="fa-solid fa-circle-check text-emerald-400 text-[10px]"></i>
+                                                      나눔 완료
+                                                  </span>
+                                              </div>
                                           )}
                                       </div>
                                       <div>
@@ -2872,7 +3108,7 @@ export default function App() {
                                                   {product.category || '기타'}
                                               </span>
                                           </div>
-                                          <h4 className="text-xs font-bold text-gray-800 truncate">{product.name}</h4>
+                                          <h4 className={`text-xs font-bold truncate ${product.status === '완료' ? 'text-gray-400 line-through' : 'text-gray-800'}`}>{product.name}</h4>
                                           <p className="text-[10px] text-gray-400 mt-0.5">{product.location}</p>
                                           {product.tags && product.tags.length > 0 && (
                                               <div className="flex items-center gap-1 overflow-hidden mt-1">
@@ -2888,7 +3124,11 @@ export default function App() {
                                           )}
                                           <div className="flex items-center justify-between mt-2 pt-2 border-t border-gray-50">
                                               <span className="text-xs font-black text-[#4A5833]">{product.price}</span>
-                                              <span className="text-[9px] font-bold text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded-full">
+                                              <span className={`text-[9px] font-black px-1.5 py-0.5 rounded-full ${
+                                                  product.status === '완료'
+                                                      ? 'text-gray-600 bg-gray-200'
+                                                      : 'text-emerald-600 bg-emerald-50'
+                                              }`}>
                                                   {getProductStatusLabel(product)}
                                               </span>
                                           </div>
@@ -3011,15 +3251,23 @@ export default function App() {
                                                   <i className={`${isLiked ? 'fa-solid text-red-500' : 'fa-regular'} fa-heart text-xs`}></i>
                                               </button>
 
-                                              <div className="w-full h-24 bg-gray-100 rounded-lg mb-2 flex items-center justify-center text-gray-400 overflow-hidden">
+                                              <div className="w-full h-24 bg-gray-100 rounded-lg mb-2 flex items-center justify-center text-gray-400 overflow-hidden relative">
                                                   {product.image ? (
                                                       <img src={product.image} alt={product.name} className="w-full h-full object-cover" />
                                                   ) : (
                                                       <i className={`${product.icon} text-3xl`}></i>
                                                   )}
+                                                  {product.status === '완료' && (
+                                                      <div className="absolute inset-0 bg-black/55 backdrop-blur-[1px] flex items-center justify-center">
+                                                          <span className="text-white text-[11px] font-black bg-black/75 px-2.5 py-1 rounded-lg border border-white/40 shadow-sm flex items-center gap-1">
+                                                              <i className="fa-solid fa-circle-check text-emerald-400 text-[10px]"></i>
+                                                              나눔 완료
+                                                          </span>
+                                                      </div>
+                                                  )}
                                               </div>
                                               <div>
-                                                  <h4 className="text-xs font-semibold text-gray-800 truncate">{product.name}</h4>
+                                                  <h4 className={`text-xs font-semibold truncate ${product.status === '완료' ? 'text-gray-400 line-through' : 'text-gray-800'}`}>{product.name}</h4>
                                                   <div className="flex items-center justify-between text-[10px] text-gray-400 mt-0.5">
                                                       <span>{product.location}</span>
                                                       <span className="flex items-center gap-1 text-[9px]"><i className="fa-regular fa-eye"></i> {product.views || 0}</span>
@@ -3040,19 +3288,23 @@ export default function App() {
                                                   <div className="flex items-center justify-between mt-2 pt-2 border-t border-gray-50">
                                                       <span className="text-xs font-bold text-[#4A5833]">{product.price}</span>
                                                       <div className="flex items-center gap-1">
-                                                          <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-medium ${
+                                                          <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-black ${
                                                               product.status === '완료' 
-                                                                  ? 'bg-gray-100 text-gray-400' 
+                                                                  ? 'bg-gray-200 text-gray-600' 
                                                                   : 'bg-emerald-50 text-emerald-600'
                                                           }`}>
                                                               {getProductStatusLabel(product)}
                                                           </span>
-                                                          {product.status !== '완료' && (
+                                                          {product.status !== '완료' && isMyProduct(product) && (
                                                               <button
                                                                   onClick={async (e) => {
                                                                       e.stopPropagation();
                                                                       await updateProductStatus(product.id, '완료');
-                                                                      alert(`'${product.name}' 상태가 '완료'로 변경되었습니다.`);
+                                                                      setProductList(prev => prev.map(p => p.id === product.id ? { ...p, status: '완료' } : p));
+                                                                      if (selectedProduct?.id === product.id) {
+                                                                          setSelectedProduct(prev => prev ? { ...prev, status: '완료' } : null);
+                                                                      }
+                                                                      triggerStatusToast(`'${product.name}' 나눔 완료 처리되었습니다.`, true);
                                                                   }}
                                                                   className="text-[9px] bg-[#E5ECD3] text-[#4A5833] font-bold px-1.5 py-0.5 rounded hover:bg-[#4A5833] hover:text-white transition"
                                                               >
@@ -3105,15 +3357,22 @@ export default function App() {
                                                   <span className={`absolute top-2 left-2 ${rankBg} text-white text-[10px] font-bold px-1.5 py-0.5 rounded`}>
                                                       {rankLabel}
                                                   </span>
-                                                  <div className="w-full h-16 bg-gray-100 rounded-lg mb-1.5 flex items-center justify-center text-gray-300 overflow-hidden">
+                                                  <div className="w-full h-16 bg-gray-100 rounded-lg mb-1.5 flex items-center justify-center text-gray-300 overflow-hidden relative">
                                                       {product.image ? (
                                                           <img src={product.image} alt={product.name} className="w-full h-full object-cover" />
                                                       ) : (
                                                           <i className={`${product.icon} text-xl`}></i>
                                                       )}
+                                                      {product.status === '완료' && (
+                                                          <div className="absolute inset-0 bg-black/55 backdrop-blur-[1px] flex items-center justify-center">
+                                                              <span className="text-white text-[9px] font-black bg-black/75 px-1.5 py-0.5 rounded border border-white/40 shadow-sm">
+                                                                  나눔 완료
+                                                              </span>
+                                                          </div>
+                                                      )}
                                                   </div>
                                                   <div className="overflow-hidden">
-                                                      <h4 className="text-xs font-semibold text-gray-800 truncate leading-snug">{product.name}</h4>
+                                                      <h4 className={`text-xs font-semibold truncate leading-snug ${product.status === '완료' ? 'text-gray-400 line-through' : 'text-gray-800'}`}>{product.name}</h4>
                                                       <p className="text-[9px] text-gray-400 truncate">{product.location}</p>
                                                       <div className="flex items-center justify-between mt-1 text-[9px] font-bold text-[#4A5833]">
                                                           <span className="truncate">{product.price}</span>
@@ -3192,17 +3451,22 @@ export default function App() {
                                               onClick={() => openProductDetail(product)}
                                               className="bg-white p-2.5 rounded-xl border border-gray-100 shadow-sm min-w-[140px] shrink-0 flex items-center gap-2.5 cursor-pointer hover:shadow-md hover:border-gray-200 transition-all active:scale-[0.98]"
                                           >
-                                              <div className="w-10 h-10 bg-gray-100 rounded-lg flex items-center justify-center text-gray-400 shrink-0 overflow-hidden">
+                                              <div className="w-10 h-10 bg-gray-100 rounded-lg flex items-center justify-center text-gray-400 shrink-0 overflow-hidden relative">
                                                   {product.image ? (
                                                       <img src={product.image} alt={product.name} className="w-full h-full object-cover" />
                                                   ) : (
                                                       <i className={`${product.icon} text-lg`}></i>
                                                   )}
+                                                  {product.status === '완료' && (
+                                                      <div className="absolute inset-0 bg-black/60 flex items-center justify-center text-[7px] font-black text-white text-center leading-tight">
+                                                          완료
+                                                      </div>
+                                                  )}
                                               </div>
                                               <div className="overflow-hidden flex-1">
-                                                  <h4 className="text-xs font-semibold text-gray-800 truncate leading-none mb-1">{product.name}</h4>
+                                                  <h4 className={`text-xs font-semibold truncate leading-none mb-1 ${product.status === '완료' ? 'text-gray-400 line-through' : 'text-gray-800'}`}>{product.name}</h4>
                                                   <div className="flex items-center justify-between text-[8px]">
-                                                      <span className={`font-semibold ${product.status === '완료' ? 'text-gray-400' : 'text-emerald-600'}`}>
+                                                      <span className={`font-black ${product.status === '완료' ? 'text-gray-500' : 'text-emerald-600'}`}>
                                                           {getProductStatusLabel(product)}
                                                       </span>
                                                       <span className="text-gray-400 font-medium shrink-0">
@@ -3499,21 +3763,28 @@ export default function App() {
                                                   onChange={async (e) => {
                                                       const file = e.target.files?.[0];
                                                       if (file) {
-                                                          setIsUploadingImage(true);
                                                           try {
-                                                              const downloadUrl = await uploadImageToFirebaseStorage(file, "item_edit");
-                                                              setEditProdImage(downloadUrl);
-                                                          } catch (err) {
-                                                              console.error("Firebase Storage upload error for edit:", err);
+                                                              const compressed = await compressImage(file, 900, 900, 0.82);
+                                                              setEditProdImage(compressed);
+                                                              setIsUploadingImage(false);
+
+                                                              try {
+                                                                  const uploadedUrl = await uploadItemImage(compressed, "item_edit");
+                                                                  if (uploadedUrl) {
+                                                                      setEditProdImage(uploadedUrl);
+                                                                  }
+                                                             } catch (err) {
+                                                                  console.warn("Storage upload fallback for edit:", err);
+                                                              }
+                                                          } catch (compressErr) {
                                                               const reader = new FileReader();
                                                               reader.onload = (uploadEvent) => {
                                                                   if (uploadEvent.target?.result) {
                                                                       setEditProdImage(uploadEvent.target.result as string);
+                                                                      setIsUploadingImage(false);
                                                                   }
                                                               };
                                                               reader.readAsDataURL(file);
-                                                          } finally {
-                                                              setIsUploadingImage(false);
                                                           }
                                                       }
                                                   }}
@@ -3594,12 +3865,58 @@ export default function App() {
                               </span>
                           )}
                           {selectedProduct.image ? (
-                              <div className="w-full h-48 rounded-2xl overflow-hidden shadow-sm border border-gray-200 bg-white">
+                              <div className="w-full h-48 rounded-2xl overflow-hidden shadow-sm border border-gray-200 bg-white relative">
                                   <img src={selectedProduct.image} alt={selectedProduct.name} className="w-full h-full object-cover" />
+                                  <AnimatePresence>
+                                      {selectedProduct.status === '완료' && (
+                                          <motion.div 
+                                              initial={{ opacity: 0 }}
+                                              animate={{ opacity: 1 }}
+                                              exit={{ opacity: 0 }}
+                                              transition={{ duration: 0.25 }}
+                                              className="absolute inset-0 bg-black/55 backdrop-blur-[1px] flex items-center justify-center"
+                                          >
+                                              <motion.span 
+                                                  initial={{ scale: 0.6, opacity: 0, y: 10 }}
+                                                  animate={{ scale: 1, opacity: 1, y: 0 }}
+                                                  exit={{ scale: 0.8, opacity: 0 }}
+                                                  transition={{ type: "spring", stiffness: 380, damping: 22 }}
+                                                  className="text-white text-sm font-black bg-black/80 px-4 py-2 rounded-xl border border-white/40 shadow-xl flex items-center gap-2"
+                                              >
+                                                  <motion.i 
+                                                      initial={{ scale: 0, rotate: -45, opacity: 0 }}
+                                                      animate={{ scale: [0, 1.4, 1], rotate: 0, opacity: 1 }}
+                                                      transition={{ duration: 0.45, ease: "easeOut", delay: 0.1 }}
+                                                      className="fa-solid fa-circle-check text-emerald-400 text-lg"
+                                                  />
+                                                  <span>나눔 완료</span>
+                                              </motion.span>
+                                          </motion.div>
+                                      )}
+                                  </AnimatePresence>
                               </div>
                           ) : (
-                              <div className="w-20 h-20 bg-white rounded-3xl flex items-center justify-center text-[#4A5833] shadow-md border border-gray-100">
+                              <div className="w-20 h-20 bg-white rounded-3xl flex items-center justify-center text-[#4A5833] shadow-md border border-gray-100 relative">
                                   <i className={`${selectedProduct.icon || 'fa-solid fa-box'} text-3xl`}></i>
+                                  <AnimatePresence>
+                                      {selectedProduct.status === '완료' && (
+                                          <motion.div 
+                                              initial={{ opacity: 0, scale: 0.8 }}
+                                              animate={{ opacity: 1, scale: 1 }}
+                                              exit={{ opacity: 0, scale: 0.8 }}
+                                              transition={{ type: "spring", stiffness: 380, damping: 22 }}
+                                              className="absolute inset-0 bg-black/60 rounded-3xl backdrop-blur-[1px] flex items-center justify-center text-white text-[10px] font-black border border-white/40 shadow-sm gap-1"
+                                          >
+                                              <motion.i 
+                                                  initial={{ scale: 0, rotate: -45 }}
+                                                  animate={{ scale: [0, 1.35, 1], rotate: 0 }}
+                                                  transition={{ duration: 0.4, ease: "easeOut" }}
+                                                  className="fa-solid fa-circle-check text-emerald-400"
+                                              />
+                                              <span>완료</span>
+                                          </motion.div>
+                                      )}
+                                  </AnimatePresence>
                               </div>
                           )}
                       </div>
@@ -3610,11 +3927,19 @@ export default function App() {
                           <div className="flex items-center justify-between flex-wrap gap-2">
                               <span className="text-[10px] font-bold text-[#4A5833] bg-[#E5ECD3] px-2 py-1 rounded-md">기숙사 나눔 물품</span>
                               <div className="flex items-center gap-1.5">
-                                  <span className={`text-[10px] px-2.5 py-0.5 rounded-full font-bold shadow-sm ${
+                                  <span className={`text-[10px] px-2.5 py-0.5 rounded-full font-bold shadow-sm transition-colors duration-200 ${
                                       selectedProduct.status === '완료' 
-                                          ? 'bg-gray-100 text-gray-400' 
+                                          ? 'bg-gray-200 text-gray-700 font-extrabold flex items-center gap-1' 
                                           : 'bg-emerald-50 text-emerald-600 border border-emerald-100'
                                   }`}>
+                                      {selectedProduct.status === '완료' && (
+                                          <motion.i 
+                                              initial={{ scale: 0, rotate: -45, opacity: 0 }}
+                                              animate={{ scale: [0, 1.35, 1], rotate: 0, opacity: 1 }}
+                                              transition={{ duration: 0.35, ease: "easeOut" }}
+                                              className="fa-solid fa-circle-check text-emerald-600 text-[10px]"
+                                          />
+                                      )}
                                       {getProductStatusLabel(selectedProduct)}
                                   </span>
                                   
@@ -3627,9 +3952,9 @@ export default function App() {
                                               const updatedProduct = { ...selectedProduct, status: nextStatus as any };
                                               setSelectedProduct(updatedProduct);
                                               setProductList(prev => prev.map(p => p.id === selectedProduct.id ? updatedProduct : p));
-                                              alert(`물품 상태가 '${nextStatus === '완료' ? '나눔 완료' : '나눔중'}'(으)로 변경되었습니다.`);
+                                              triggerStatusToast(nextStatus === '완료' ? "물품 상태가 '나눔 완료'로 변경되었습니다." : "물품 상태가 '나눔중'으로 변경되었습니다.", nextStatus === '완료');
                                           }}
-                                          className="text-[10px] bg-[#4A5833] text-white px-2.5 py-1 rounded-lg font-bold hover:bg-[#3E4C27] active:scale-95 transition shadow-sm"
+                                          className="text-[10px] bg-[#4A5833] text-white px-2.5 py-1 rounded-lg font-bold hover:bg-[#3E4C27] active:scale-95 transition shadow-sm cursor-pointer"
                                       >
                                           {selectedProduct.status === '완료' ? '나눔중으로 변경' : '완료로 변경'}
                                       </button>
@@ -3741,6 +4066,10 @@ export default function App() {
                                       >
                                           <i className="fa-solid fa-trash-can"></i> 삭제하기
                                       </button>
+                                  </div>
+                              ) : selectedProduct.status === '완료' ? (
+                                  <div className="flex-1 bg-gray-100 border border-gray-200 text-gray-500 font-extrabold py-3 rounded-xl text-xs flex items-center justify-center gap-1.5 shadow-xs cursor-not-allowed">
+                                      <i className="fa-solid fa-circle-check text-gray-400 text-sm"></i> 이 물품은 나눔 완료되었습니다
                                   </div>
                               ) : (
                                   <button
@@ -4076,8 +4405,8 @@ export default function App() {
                                       </div>
                                   </div>
                                   <div className="flex items-center gap-1.5 shrink-0" onClick={(e) => e.stopPropagation()}>
-                                      <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${product.status === '완료' ? 'bg-gray-200 text-gray-500' : 'bg-emerald-100 text-emerald-700'}`}>
-                                          {product.status}
+                                      <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${product.status === '완료' ? 'bg-gray-200 text-gray-700 font-black' : 'bg-emerald-100 text-emerald-700'}`}>
+                                          {product.status === '완료' ? '나눔 완료' : product.status}
                                       </span>
                                       <button
                                           type="button"
@@ -4135,8 +4464,8 @@ export default function App() {
                       </button>
                   </div>
                   <div className="overflow-y-auto space-y-2 flex-1 pr-1">
-                      {productList.filter(p => p.status === '완료').length > 0 ? (
-                          productList.filter(p => p.status === '완료').map((product) => (
+                      {productList.filter(p => isMyProduct(p) && p.status === '완료').length > 0 ? (
+                          productList.filter(p => isMyProduct(p) && p.status === '완료').map((product) => (
                               <div key={product.id} className="p-3 bg-gray-50 rounded-2xl border border-gray-100 flex items-center justify-between">
                                   <div className="flex items-center gap-2.5">
                                       <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center text-gray-400 border border-gray-100">
@@ -4258,11 +4587,11 @@ export default function App() {
                               <span className="text-base sm:text-xl font-black text-gray-900">{adminStats.totalProducts || productList.length}개</span>
                           </div>
 
-                          {/* 거래 완료 */}
+                          {/* 전체 완료된 나눔 (앱 전체 모든 완료 건수 수치화) */}
                           <div className="bg-white p-2 sm:p-3 rounded-2xl border border-gray-200/80 shadow-xs flex flex-col items-center justify-center min-h-[70px]">
-                              <span className="text-[10px] sm:text-xs font-bold text-gray-500 mb-0.5 leading-tight">거래 완료</span>
+                              <span className="text-[10px] sm:text-xs font-bold text-gray-500 mb-0.5 leading-tight">전체 완료된 나눔</span>
                               <span className="text-base sm:text-xl font-black text-emerald-600">
-                                  {adminStats.completedDeals || productList.filter(p => p.status === '완료').length}건
+                                  {Math.max(adminStats.completedDeals || 0, productList.filter(p => p.status === '완료').length)}건
                               </span>
                           </div>
 
@@ -4463,7 +4792,7 @@ export default function App() {
                           <div className="space-y-3 animate-fade-in">
                               <div className="flex items-center justify-between px-1">
                                   <h3 className="text-xs font-black text-gray-800">
-                                      전체 물품 관리 ({productList.length}개)
+                                      전체 물품 관리 ({productList.length}개 / 앱 전체 완료된 나눔 {Math.max(adminStats.completedDeals || 0, productList.filter(p => p.status === '완료').length)}건)
                                   </h3>
                                   <span className="text-[10px] text-gray-400">
                                       * 최고 관리자 권한으로 상태 관리 가능
@@ -4506,6 +4835,7 @@ export default function App() {
                                                       const next = p.status === '완료' ? '나눔중' : '완료';
                                                       await updateProductStatus(p.id, next as any);
                                                       setProductList(prev => prev.map(item => item.id === p.id ? { ...item, status: next as any } : item));
+                                                      triggerStatusToast(next === '완료' ? `'${p.name}' 나눔 완료 처리되었습니다.` : `'${p.name}' 나눔중으로 변경되었습니다.`, next === '완료');
                                                   }}
                                                   className="text-[10px] bg-[#4A5833] text-white font-bold px-2.5 py-1 rounded-lg hover:bg-[#3E4C27] transition shrink-0"
                                               >
@@ -5109,6 +5439,40 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* 나눔 완료 상태 변경 시 부드럽게 나타나는 체크 표시 알림 애니메이션 */}
+      <AnimatePresence>
+        {statusToastNotice && (
+          <motion.div
+            initial={{ opacity: 0, y: 30, scale: 0.85 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 20, scale: 0.9 }}
+            transition={{ type: "spring", stiffness: 450, damping: 26 }}
+            className="fixed bottom-20 left-1/2 -translate-x-1/2 z-[160] bg-gray-900/90 text-white backdrop-blur-md px-4 py-2.5 rounded-2xl shadow-2xl flex items-center gap-3 border border-white/20 pointer-events-none"
+          >
+            {statusToastNotice.isCompleted ? (
+              <motion.span
+                initial={{ scale: 0, rotate: -45 }}
+                animate={{ scale: [0, 1.35, 1], rotate: 0 }}
+                transition={{ duration: 0.45, ease: "easeOut", delay: 0.05 }}
+                className="w-7 h-7 rounded-full bg-emerald-500 flex items-center justify-center text-white text-xs shadow-md shrink-0"
+              >
+                <motion.i 
+                  initial={{ opacity: 0, scale: 0.5 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  transition={{ duration: 0.2, delay: 0.15 }}
+                  className="fa-solid fa-check text-sm"
+                />
+              </motion.span>
+            ) : (
+              <span className="w-7 h-7 rounded-full bg-[#4A5833] flex items-center justify-center text-white text-xs shadow-md shrink-0">
+                <i className="fa-solid fa-rotate text-xs"></i>
+              </span>
+            )}
+            <span className="text-xs font-bold whitespace-nowrap">{statusToastNotice.message}</span>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
     </div>
   );

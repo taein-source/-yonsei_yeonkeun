@@ -42,15 +42,18 @@ export const CameraCaptureModal: React.FC<CameraCaptureModalProps> = ({
       setStream(newStream);
       if (videoRef.current) {
         videoRef.current.srcObject = newStream;
+        videoRef.current.onloadedmetadata = () => {
+          videoRef.current?.play().catch(() => {});
+        };
       }
     } catch (err: any) {
       console.error('카메라 권한 및 스트림 에러:', err);
       if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-        setPermissionError('카메라 권한이 거부되었습니다. 브라우저 설정에서 카메라 권한을 허용해주셔야 직접 촬영이 가능합니다.');
+        setPermissionError('카메라 권한이 거부되었거나 접근할 수 없습니다. 권한을 허용해주시거나 아래 [기기 기본 카메라로 촬영]을 이용해주세요.');
       } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
-        setPermissionError('사용 가능한 카메라 장치를 찾을 수 없습니다.');
+        setPermissionError('사용 가능한 웹캠 장치를 찾을 수 없습니다. 아래 [기기 기본 카메라로 촬영]을 이용해주세요.');
       } else {
-        setPermissionError('카메라를 작동할 수 없습니다: ' + (err.message || '알 수 없는 오류'));
+        setPermissionError('카메라를 작동할 수 없습니다. 아래 [기기 기본 카메라로 촬영]을 이용해주세요.');
       }
     } finally {
       setIsInitializing(false);
@@ -74,9 +77,27 @@ export const CameraCaptureModal: React.FC<CameraCaptureModalProps> = ({
     if (!videoRef.current) return;
     const video = videoRef.current;
 
+    const rawWidth = video.videoWidth || 640;
+    const rawHeight = video.videoHeight || 480;
+
+    // 최대 1000px로 비율 유지 최적화 (선명한 화질 유지 & 빠른 업로드)
+    const maxDimension = 1000;
+    let targetWidth = rawWidth;
+    let targetHeight = rawHeight;
+
+    if (targetWidth > maxDimension || targetHeight > maxDimension) {
+      if (targetWidth > targetHeight) {
+        targetHeight = Math.round((targetHeight * maxDimension) / targetWidth);
+        targetWidth = maxDimension;
+      } else {
+        targetWidth = Math.round((targetWidth * maxDimension) / targetHeight);
+        targetHeight = maxDimension;
+      }
+    }
+
     const canvas = document.createElement('canvas');
-    canvas.width = video.videoWidth || 640;
-    canvas.height = video.videoHeight || 480;
+    canvas.width = targetWidth;
+    canvas.height = targetHeight;
 
     const ctx = canvas.getContext('2d');
     if (ctx) {
@@ -84,11 +105,26 @@ export const CameraCaptureModal: React.FC<CameraCaptureModalProps> = ({
         ctx.translate(canvas.width, 0);
         ctx.scale(-1, 1);
       }
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      const dataUrl = canvas.toDataURL('image/jpeg', 0.88);
+      ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
       stopCamera();
       onCapture(dataUrl);
       onClose();
+    }
+  };
+
+  const handleNativeFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        if (reader.result) {
+          stopCamera();
+          onCapture(reader.result as string);
+          onClose();
+        }
+      };
+      reader.readAsDataURL(file);
     }
   };
 
@@ -131,13 +167,26 @@ export const CameraCaptureModal: React.FC<CameraCaptureModalProps> = ({
                 <i className="fa-solid fa-camera-rotate"></i>
               </div>
               <p className="text-xs text-red-300 font-bold leading-relaxed">{permissionError}</p>
-              <button
-                type="button"
-                onClick={() => startCamera(facingMode)}
-                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl transition shadow-md cursor-pointer"
-              >
-                <i className="fa-solid fa-rotate-right mr-1.5"></i> 권한 재요청 / 다시 시도
-              </button>
+              <div className="flex flex-col gap-2 pt-1">
+                <label className="px-4 py-2.5 bg-[#88A386] hover:bg-[#728C70] text-[#1E2619] font-black text-xs rounded-xl transition shadow-md cursor-pointer inline-flex items-center justify-center gap-1.5 active:scale-98">
+                  <i className="fa-solid fa-camera text-sm"></i>
+                  <span>기기 기본 카메라로 촬영하기</span>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    capture="environment"
+                    className="hidden"
+                    onChange={handleNativeFileInput}
+                  />
+                </label>
+                <button
+                  type="button"
+                  onClick={() => startCamera(facingMode)}
+                  className="px-4 py-2 bg-white/10 hover:bg-white/20 text-white font-bold text-xs rounded-xl transition cursor-pointer"
+                >
+                  <i className="fa-solid fa-rotate-right mr-1.5"></i> 웹캠 권한 다시 시도
+                </button>
+              </div>
             </div>
           ) : (
             <>
@@ -159,25 +208,40 @@ export const CameraCaptureModal: React.FC<CameraCaptureModalProps> = ({
         </div>
 
         {/* 컨트롤 버튼 */}
-        <div className="p-4 bg-[#2A3423] border-t border-[#3E4C27] flex items-center justify-between gap-3">
+        <div className="p-4 bg-[#2A3423] border-t border-[#3E4C27] flex items-center justify-between gap-2.5">
           <button
             type="button"
             onClick={toggleFacingMode}
             disabled={!!permissionError || isInitializing}
-            className="px-3.5 py-2.5 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-bold flex items-center gap-1.5 transition disabled:opacity-40 cursor-pointer shrink-0"
+            className="px-3 py-2.5 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-bold flex items-center gap-1.5 transition disabled:opacity-40 cursor-pointer shrink-0"
           >
             <i className="fa-solid fa-repeat text-xs"></i>
-            <span>{facingMode === 'environment' ? '전면 카메라' : '후면 카메라'}</span>
+            <span>{facingMode === 'environment' ? '전면' : '후면'}</span>
           </button>
+
+          <label 
+            title="기기 기본 카메라 앱으로 촬영"
+            className="px-3 py-2.5 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-bold flex items-center gap-1.5 transition cursor-pointer shrink-0 active:scale-95"
+          >
+            <i className="fa-solid fa-mobile-screen text-xs"></i>
+            <span>기기 카메라</span>
+            <input
+              type="file"
+              accept="image/*"
+              capture="environment"
+              className="hidden"
+              onChange={handleNativeFileInput}
+            />
+          </label>
 
           <button
             type="button"
             onClick={handleCapturePhoto}
             disabled={!stream || !!permissionError || isInitializing}
-            className="flex-1 py-3 bg-[#88A386] hover:bg-[#728C70] text-[#1E2619] font-black text-sm rounded-xl transition shadow-lg flex items-center justify-center gap-2 disabled:opacity-40 active:scale-98 cursor-pointer"
+            className="flex-1 py-2.5 bg-[#88A386] hover:bg-[#728C70] text-[#1E2619] font-black text-xs sm:text-sm rounded-xl transition shadow-lg flex items-center justify-center gap-2 disabled:opacity-40 active:scale-98 cursor-pointer"
           >
             <i className="fa-solid fa-camera text-base"></i>
-            <span>사진 촬영하기</span>
+            <span>사진 촬영</span>
           </button>
         </div>
       </div>

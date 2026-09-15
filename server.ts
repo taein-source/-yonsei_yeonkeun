@@ -225,11 +225,63 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  // JSON request body parser with larger limit for base64 images
-  app.use(express.json({ limit: "15mb" }));
+  // Static files for user uploads
+  const UPLOADS_DIR = path.join(process.cwd(), "public/uploads");
+  if (!fs.existsSync(UPLOADS_DIR)) {
+    fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+  }
 
-  // Static files for avatar PNGs
+  // JSON request body parser with larger limit for base64 images
+  app.use(express.json({ limit: "25mb" }));
+
+  // Static files for avatar PNGs and item uploads
   app.use("/avatars", express.static(path.join(process.cwd(), "public/avatars")));
+  app.use("/uploads", express.static(UPLOADS_DIR));
+
+  // Helper to save base64 data URL to static file
+  function saveBase64ToFile(dataUrl: string, prefix = "item"): string {
+    if (!dataUrl || typeof dataUrl !== "string" || !dataUrl.startsWith("data:")) {
+      return dataUrl;
+    }
+    try {
+      const matches = dataUrl.match(/^data:([A-Za-z-+\/]+);base64,(.+)$/);
+      if (!matches || matches.length !== 3) return dataUrl;
+
+      const mimeType = matches[1];
+      const base64Data = matches[2];
+      const buffer = Buffer.from(base64Data, 'base64');
+      const ext = mimeType.includes('png') ? 'png' : mimeType.includes('webp') ? 'webp' : 'jpg';
+      const cleanPrefix = prefix.replace(/[^a-zA-Z0-9_-]/g, '') || 'item';
+      const filename = `${cleanPrefix}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}.${ext}`;
+      const filePath = path.join(UPLOADS_DIR, filename);
+      fs.writeFileSync(filePath, buffer);
+      return `/uploads/${filename}`;
+    } catch (err) {
+      console.error("Failed to save base64 to file:", err);
+      return dataUrl;
+    }
+  }
+
+  // Standalone Image Upload API (Accepts Base64 dataUrl)
+  app.post("/api/upload", (req, res) => {
+    try {
+      const { image, filename } = req.body;
+      if (!image || typeof image !== "string") {
+        return res.status(400).json({ success: false, message: "이미지 데이터가 필요합니다." });
+      }
+
+      // Return data URL or external URL directly for persistent storage across container restarts
+      if (image.startsWith("http://") || image.startsWith("https://") || image.startsWith("data:") || image.startsWith("/uploads/")) {
+        return res.json({ success: true, url: image });
+      }
+
+      const publicUrl = saveBase64ToFile(image, filename || "prod");
+      return res.json({ success: true, url: publicUrl });
+    } catch (err) {
+      console.error("API /api/upload error:", err);
+      return res.status(500).json({ success: false, message: "이미지 업로드 처리 실패" });
+    }
+  });
 
   // Health check route
   app.get("/api/health", (_req, res) => {
@@ -515,6 +567,53 @@ async function startServer() {
     }
   });
 
+  // 6-2. 로그인한 회원 목록 등록/동기화 API
+  app.post("/api/users/sync-logged-in", (req, res) => {
+    try {
+      const { id, username, name, location, role, lastLoginAt, avatarUrl } = req.body;
+      if (!username) {
+        return res.status(400).json({ success: false, message: "username이 필요합니다." });
+      }
+
+      // 테스트 유저는 등록하지 않음
+      if (username.startsWith("testrandomavatar") || name === "테스트유저" || name === "테스트유저3") {
+        return res.json({ success: true, message: "테스트 유저는 건너뜁니다." });
+      }
+
+      const existingUser = usersStore.find(
+        u => u.username.trim().toLowerCase() === username.trim().toLowerCase()
+      );
+
+      const nowIso = lastLoginAt || new Date().toISOString();
+
+      if (existingUser) {
+        existingUser.lastLoginAt = nowIso;
+        if (name) existingUser.name = name;
+        if (location) existingUser.location = location;
+        if (role) existingUser.role = role;
+        if (avatarUrl) existingUser.avatarUrl = avatarUrl;
+      } else {
+        const newUser: UserAccount = {
+          id: id || `user_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+          username: username.trim(),
+          password: "DormUser!2026$Secure",
+          name: name ? name.trim() : username.trim(),
+          location: location || "제1기숙사 A동 302호",
+          role: role === "admin" || username === SYSTEM_ADMIN_ACCOUNT.username ? "admin" : "user",
+          avatarUrl: avatarUrl || getRandomAvatar(),
+          createdAt: nowIso,
+          lastLoginAt: nowIso
+        };
+        usersStore.push(newUser);
+      }
+
+      saveJSON(USERS_FILE, usersStore);
+      return res.json({ success: true, message: "로그인 유저가 등록/갱신되었습니다." });
+    } catch (err) {
+      return res.status(500).json({ success: false, message: "로그인 유저 동기화 실패" });
+    }
+  });
+
   // 7. 사용자 데이터 동기화
   app.post("/api/user/sync", (req, res) => {
     try {
@@ -603,7 +702,7 @@ async function startServer() {
         return res.status(400).json({ success: false, message: "물품 이름이 필요합니다." });
       }
 
-      const finalImg = imageUrl || image || undefined;
+      let finalImg = imageUrl || image || undefined;
 
       const newProduct: ServerProduct = {
         id: `prod_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
@@ -670,6 +769,7 @@ async function startServer() {
 
       Object.assign(prod, otherFields);
       if (otherFields.imageUrl) prod.image = otherFields.imageUrl;
+      if (otherFields.image) prod.imageUrl = otherFields.image;
       if (otherFields.image && !otherFields.imageUrl) prod.imageUrl = otherFields.image;
 
       productsStore[prodIndex] = prod;
@@ -727,13 +827,17 @@ async function startServer() {
         return res.json({ success: true, rooms: [] });
       }
 
-      // 내 계정이 참여중인 대화방 검색
+      // 내 계정이 참여중인 대화방만 엄격하게 검색 (제3자 계정 노출 원천 차단)
       const userRooms = chatRoomsStore.filter(room => {
+        if (!room || !Array.isArray(room.participants)) return false;
         return room.participants.some(p => {
           const pUsername = (p.username || "").trim().toLowerCase();
+          if (queryUsername) {
+            return pUsername === queryUsername;
+          }
+          // queryUsername이 없는 경우에만 정확한 이름 일치(===)로만 제한 (부분 일치 제거)
           const pName = (p.name || "").trim();
-          return (queryUsername && pUsername === queryUsername) ||
-                 (queryName && (pName.includes(queryName) || queryName.includes(pName)));
+          return queryName && pName === queryName;
         });
       });
 
@@ -742,12 +846,12 @@ async function startServer() {
         const updatedParticipants = room.participants.map(p => {
           const liveUser = usersStore.find(u => {
             const uUsername = (u.username || "").trim().toLowerCase();
-            const uName = (u.name || "").trim();
             const pUsername = (p.username || "").trim().toLowerCase();
-            const pName = (p.name || "").trim();
-
             if (pUsername && uUsername === pUsername) return true;
-            if (pName && (uName.includes(pName) || pName.includes(uName))) return true;
+
+            const uName = (u.name || "").trim();
+            const pName = (p.name || "").trim();
+            if (pName && uName === pName) return true;
             return false;
           });
 
@@ -779,7 +883,7 @@ async function startServer() {
     }
   });
 
-  // 2. 1:1 대화방 생성 또는 기존 대화방 조회
+  // 2. 1:1 대화방 생성 또는 기존 대화방 조회 (A와 B 전용 방 격리)
   app.post("/api/chats/room", (req, res) => {
     try {
       const {
@@ -789,43 +893,67 @@ async function startServer() {
         initialMessage
       } = req.body;
 
-      // 상대방 유저 정보 usersStore 조회
-      const targetUser = usersStore.find(u => {
-        const uUsername = (u.username || "").trim().toLowerCase();
-        const uName = (u.name || "").trim();
-        if (targetUsername && uUsername === targetUsername.trim().toLowerCase()) return true;
-        if (targetName && (uName.includes(targetName.trim()) || targetName.trim().includes(uName))) return true;
-        return false;
-      });
-
-      const resTargetUsername = targetUser?.username || targetUsername || `user_${Date.now()}`;
-      const resTargetName = targetUser?.name || targetName || "기숙사 메이트";
-      const resTargetLocation = targetUser?.location || targetLocation || "기숙사";
-      const resTargetAvatar = targetUser?.avatarUrl || targetAvatar || SYSTEM_ADMIN_AVATAR;
-
       // 내 유저 정보 usersStore 조회
       const myUser = usersStore.find(u => {
         const uUsername = (u.username || "").trim().toLowerCase();
         return myUsername && uUsername === myUsername.trim().toLowerCase();
       });
 
-      const resMyUsername = myUser?.username || myUsername || "guest";
+      const resMyUsername = (myUser?.username || myUsername || "").trim();
       const resMyName = myUser?.name || myName || "나";
       const resMyLocation = myUser?.location || myLocation || "기숙사";
       const resMyAvatar = myUser?.avatarUrl || myAvatar || SYSTEM_ADMIN_AVATAR;
 
-      // 기존 동일한 대화 상대와의 대화방이 존재하는지 검색
+      if (!resMyUsername) {
+        return res.status(400).json({ success: false, message: "대화를 시작하려면 로그인이 필요합니다." });
+      }
+
+      // 상대방 유저 정보 usersStore 조회
+      let targetUser = usersStore.find(u => {
+        const uUsername = (u.username || "").trim().toLowerCase();
+        return targetUsername && uUsername === targetUsername.trim().toLowerCase();
+      });
+
+      // targetUsername으로 못 찾았을 경우 정확한 이름 일치(===)로만 조회
+      if (!targetUser && targetName) {
+        const cleanTargetName = targetName.replace(/\(.*?\)/g, "").trim();
+        targetUser = usersStore.find(u => {
+          const uName = (u.name || "").trim();
+          return uName === cleanTargetName || uName === targetName.trim();
+        });
+      }
+
+      const resTargetUsername = (targetUser?.username || targetUsername || "").trim();
+      const resTargetName = targetUser?.name || targetName || "기숙사 메이트";
+      const resTargetLocation = targetUser?.location || targetLocation || "기숙사";
+      const resTargetAvatar = targetUser?.avatarUrl || targetAvatar || SYSTEM_ADMIN_AVATAR;
+
+      if (!resTargetUsername) {
+        return res.status(400).json({ success: false, message: "대화 상대를 찾을 수 없습니다." });
+      }
+
+      // 본인 자신과의 대화 방지
+      if (resMyUsername.toLowerCase() === resTargetUsername.toLowerCase()) {
+        return res.status(400).json({ success: false, message: "본인이 등록한 물품이거나 자신과는 대화할 수 없습니다." });
+      }
+
+      const cleanMyUsername = resMyUsername.toLowerCase();
+      const cleanTargetUsername = resTargetUsername.toLowerCase();
+
+      // 기존 1:1 대화방 검색:
+      // 반드시 정확히 나와 상대방(2명)만 참여하고 있는 방이어야 하며, 제3자(C)의 방과 절대 혼용되지 않음
       let existingRoom = chatRoomsStore.find(room => {
-        const hasMe = room.participants.some(p => 
-          (p.username && p.username.trim().toLowerCase() === resMyUsername.trim().toLowerCase()) ||
-          (p.name && p.name.trim() === resMyName.trim())
-        );
-        const hasTarget = room.participants.some(p => 
-          (p.username && p.username.trim().toLowerCase() === resTargetUsername.trim().toLowerCase()) ||
-          (p.name && (p.name.trim().includes(resTargetName.trim()) || resTargetName.trim().includes(p.name.trim())))
-        );
-        const sameProduct = !productId || room.productId === productId || room.productName === productName;
-        return hasMe && hasTarget && sameProduct;
+        if (!room || !Array.isArray(room.participants) || room.participants.length !== 2) return false;
+        
+        const pUsernames = room.participants.map(p => (p.username || "").trim().toLowerCase());
+        const isExactTwoParticipants = pUsernames.includes(cleanMyUsername) && pUsernames.includes(cleanTargetUsername);
+        if (!isExactTwoParticipants) return false;
+
+        // 물품 ID가 지정된 경우 동일 물품에 대한 대화방인지 검증
+        if (productId) {
+          return room.productId === String(productId);
+        }
+        return true;
       });
 
       if (existingRoom) {
@@ -855,7 +983,7 @@ async function startServer() {
 
       const newRoom: ServerChatRoom = {
         id: roomId,
-        productId: productId || undefined,
+        productId: productId ? String(productId) : undefined,
         productName: productName || "물품 대화",
         productPrice: productPrice || "무료",
         productIcon: productIcon || "fa-solid fa-box",
@@ -863,7 +991,7 @@ async function startServer() {
           { username: resMyUsername, name: resMyName, location: resMyLocation, avatarUrl: resMyAvatar },
           { username: resTargetUsername, name: resTargetName, location: resTargetLocation, avatarUrl: resTargetAvatar }
         ],
-        lastMessage: initialMessage ? initialMessage.trim() : `'${productName}' 대화를 시작했습니다.`,
+        lastMessage: initialMessage ? initialMessage.trim() : `'${productName || "물품"}' 대화를 시작했습니다.`,
         lastTime: '방금 전',
         updatedAt: Date.now(),
         messages: initialMsgs
@@ -895,7 +1023,7 @@ async function startServer() {
     }
   });
 
-  // 3. 메시지 전송 API (자동 답장 완전 제거, 오직 실제 계정 간 대화 전송)
+  // 3. 메시지 전송 API (참여자 권한 검증 추가: 오직 참여자만 메시지 전송 가능)
   app.post("/api/chats/:roomId/messages", (req, res) => {
     try {
       const { roomId } = req.params;
@@ -905,17 +1033,33 @@ async function startServer() {
         return res.status(400).json({ success: false, message: "메시지 내용이나 사진을 입력하세요." });
       }
 
+      if (!senderUsername) {
+        return res.status(401).json({ success: false, message: "메시지를 보내려면 로그인이 필요합니다." });
+      }
+
       const roomIndex = chatRoomsStore.findIndex(r => r.id === roomId);
       if (roomIndex === -1) {
         return res.status(404).json({ success: false, message: "대화방을 찾을 수 없습니다." });
       }
 
       const room = chatRoomsStore[roomIndex];
+
+      // 엄격한 대화방 참여자 권한 검증: senderUsername이 room.participants에 속해 있는지 확인
+      const sUsername = (senderUsername || "").trim().toLowerCase();
+      const isParticipant = Array.isArray(room.participants) && room.participants.some(
+        p => (p.username || "").trim().toLowerCase() === sUsername
+      );
+
+      if (!isParticipant) {
+        console.warn(`[CHAT SECURITY] Unauthorized message attempt by ${senderUsername} to room ${roomId}`);
+        return res.status(403).json({ success: false, message: "해당 대화방의 참여자만 메시지를 전송할 수 있습니다." });
+      }
+
       const nowStr = new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
 
       const newMsg: ServerChatMessage = {
         id: `m_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
-        senderUsername: senderUsername || "guest",
+        senderUsername: senderUsername,
         senderName: senderName || "사용자",
         text: (text || "").trim(),
         timestamp: nowStr,
@@ -935,12 +1079,12 @@ async function startServer() {
       // 메시지 전송 활동 로그 기록
       const msgLog: AccessLog = {
         id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
-        userId: senderUsername || "guest",
-        username: senderUsername || "guest",
+        userId: senderUsername,
+        username: senderUsername,
         name: senderName || "사용자",
         role: "user",
         action: "CHAT_MESSAGE" as any,
-        details: `대화 메시지 전송: [${senderName}] -> "${text.trim().substring(0, 30)}${text.trim().length > 30 ? '...' : ''}"`,
+        details: `대화 메시지 전송: [${senderName}] -> "${(text || '').trim().substring(0, 30)}"`,
         ip: req.ip || "127.0.0.1",
         userAgent: req.headers["user-agent"] || "Web Browser",
         timestamp: new Date().toISOString()
