@@ -22,24 +22,78 @@
       },
       "required": ["name", "location", "price", "status", "seller"]
     },
-    "User": {
-      "title": "User",
-      "description": "연근마켓 회원 계정 정보",
+    "ChatRoom": {
+      "title": "ChatRoom",
+      "description": "1:1 대화방",
       "type": "object",
       "properties": {
-        "username": { "type": "string", "description": "회원 로그인 아이디 (고유 키)" },
-        "password": { "type": "string", "description": "회원 비밀번호" },
-        "name": { "type": "string", "description": "회원 성명" },
-        "location": { "type": "string", "description": "기숙사 방 호수" },
-        "role": { "type": "string", "description": "역할 (user 또는 admin)" },
-        "avatarUrl": { "type": "string", "description": "프로필 아바타 이미지 URL" },
-        "createdAt": { "type": "string", "description": "가입 일시" },
-        "lastLoginAt": { "type": "string", "description": "최근 로그인 일시" }
+        "id": { "type": "string", "description": "대화방 고유 ID" },
+        "productId": { "type": "string", "description": "관련 물품 ID" },
+        "productName": { "type": "string", "description": "물품 이름" },
+        "productPrice": { "type": "string", "description": "물품 가격" },
+        "productIcon": { "type": "string", "description": "물품 아이콘" },
+        "participantUsernames": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "참여자 유저네임 목록"
+        },
+        "participants": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "username": { "type": "string" },
+              "name": { "type": "string" },
+              "location": { "type": "string" },
+              "avatarUrl": { "type": "string" }
+            }
+          },
+          "description": "참여자 상세 정보"
+        },
+        "lastMessage": { "type": "string", "description": "마지막 대화 내용" },
+        "lastTime": { "type": "string", "description": "마지막 대화 시간" },
+        "updatedAt": { "type": "number", "description": "수정 시각 (timestamp ms)" }
       },
-      "required": ["username", "password", "name", "role"]
+      "required": ["id", "participants", "participantUsernames", "updatedAt"]
+    },
+    "ChatMessage": {
+      "title": "ChatMessage",
+      "description": "1:1 대화 메시지",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "메시지 ID" },
+        "senderUsername": { "type": "string", "description": "발신자 유저네임" },
+        "senderName": { "type": "string", "description": "발신자 이름" },
+        "text": { "type": "string", "description": "메시지 내용" },
+        "imageUrl": { "type": "string", "description": "첨부 이미지 URL" },
+        "timestamp": { "type": "string", "description": "표시 시각" },
+        "createdAt": { "type": "number", "description": "작성 시각 (timestamp ms)" }
+      },
+      "required": ["id", "senderUsername", "senderName", "createdAt"]
+    },
+    "User": {
+      "title": "User",
+      "description": "연근마켓 회원 계정 및 프로필 정보",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "유저 고유 ID" },
+        "username": { "type": "string", "description": "아이디" },
+        "name": { "type": "string", "description": "이름 및 닉네임" },
+        "location": { "type": "string", "description": "기숙사 거주 호실" },
+        "role": { "type": "string", "description": "회원 권한 (admin, user)" },
+        "avatarUrl": { "type": "string", "description": "프로필 사진 URL" },
+        "password": { "type": "string", "description": "비밀번호" },
+        "createdAt": { "type": "string", "description": "가입 일시" },
+        "lastLoginAt": { "type": "string", "description": "최종 로그인 일시" }
+      },
+      "required": ["id", "username", "name", "location", "role"]
     }
   },
   "firestore": {
+    "/users/{username}": {
+      "schema": "User",
+      "description": "회원 계정 및 인증 데이터 컬렉션"
+    },
     "/items/{itemId}": {
       "schema": "Item",
       "description": "물품 목록 컬렉션"
@@ -48,9 +102,13 @@
       "schema": "Item",
       "description": "호환용 물품 컬렉션"
     },
-    "/users/{userId}": {
-      "schema": "User",
-      "description": "회원 계정 정보 컬렉션"
+    "/chats/{chatRoomId}": {
+      "schema": "ChatRoom",
+      "description": "1:1 대화방 목록 컬렉션"
+    },
+    "/chats/{chatRoomId}/messages/{messageId}": {
+      "schema": "ChatMessage",
+      "description": "대화방 메시지 컬렉션"
     }
   }
 }

@@ -10,6 +10,7 @@ import {
   doc, 
   onSnapshot, 
   query, 
+  where,
   orderBy, 
   increment,
   setDoc,
@@ -102,15 +103,8 @@ export const getLocalProducts = (): Product[] => {
       return [];
     }
     const parsed: Product[] = JSON.parse(stored);
-    const mockNames = [
-      "2단 행거 (상태양호)", "LED 책상 스탠드", "전공서적 (컴공)", "미니 탁상 선풍기", "멀티탭 4구 (3m)", "빨래바구니",
-      "접이식 2단 원룸 빨래 건조대", "접이식 2단 미니 빨래 건조대", "샤오미 4구 고속 충전 멀티탭 (3m)", "샤오미 4구 고속 충전 멀티탭(3m)"
-    ];
-    const filtered = parsed.filter(p => 
-      !mockNames.some(m => p.name.includes(m) || m.includes(p.name)) && 
-      p.id !== "prod_init_001" && 
-      p.id !== "prod_init_002"
-    );
+    const obsoleteMockIds = ["prod_init_001", "prod_init_002"];
+    const filtered = parsed.filter(p => !obsoleteMockIds.includes(String(p.id)));
     if (filtered.length !== parsed.length) {
       saveLocalProducts(filtered);
     }
@@ -155,13 +149,13 @@ export const saveLocalProducts = (products: Product[]) => {
  * Upload and retrieve the top event banner image URL from Firebase Storage
  */
 export const getOrUploadTopEventBanner = async (): Promise<string> => {
-  const defaultUrl = "https://i.ibb.co/PvMGnBvN/upperbanner-png.jpg";
+  const defaultUrl = "/upperbanner-png.jpg";
   const localFallbackUrl = "/upperbanner-png.jpg";
   if (!storage) {
     return defaultUrl;
   }
 
-  const eventBannerRef = ref(storage, "banners/upperbanner_v2.jpg");
+  const eventBannerRef = ref(storage, "banners/upperbanner_clean_v3.jpg");
   try {
     const existingUrl = await getDownloadURL(eventBannerRef);
     if (existingUrl) return existingUrl;
@@ -424,15 +418,26 @@ export const uploadItemImage = async (
 /**
  * Fetch all items/products from Firestore (realtime subscriber format), or backend/localStorage fallback.
  */
-export const getProducts = async (callback: (products: Product[]) => void) => {
+export const getProducts = (callback: (products: Product[]) => void) => {
+  let isUnsubscribed = false;
+  let hasReceivedFirestoreData = false;
+
   const fetchBackendProducts = async () => {
+    // If Firestore has already delivered real-time accurate data, do not overwrite with stale backend data
+    if (hasReceivedFirestoreData) {
+      return true;
+    }
     try {
       const res = await fetch(getApiUrl("/api/products"));
       if (res.ok) {
         const data = await res.json();
         if (data.success && Array.isArray(data.products)) {
-          saveLocalProducts(data.products);
-          callback(data.products);
+          if (!hasReceivedFirestoreData) {
+            saveLocalProducts(data.products);
+            if (!isUnsubscribed) {
+              callback(data.products);
+            }
+          }
           return true;
         }
       }
@@ -442,105 +447,84 @@ export const getProducts = async (callback: (products: Product[]) => void) => {
     return false;
   };
 
+  let unsubscribeFirestore: (() => void) | null = null;
+  let pollInterval: NodeJS.Timeout | null = null;
+
   if (isFirebaseAvailable && db) {
     try {
       // Query 'items' collection in Firestore
       const q = query(collection(db, "items"), orderBy("date", "desc"));
       
-      const unsubscribe = onSnapshot(q, (snapshot) => {
-        if (!snapshot.empty) {
-          const itemsList: Product[] = [];
-          snapshot.forEach((docSnap) => {
-            const data = docSnap.data();
-            const img = data.imageUrl || data.image || undefined;
-            itemsList.push({
-              id: docSnap.id,
-              name: data.name,
-              category: data.category,
-              location: data.location,
-              price: data.price,
-              icon: data.icon || "fa-solid fa-box",
-              imageUrl: img,
-              image: img,
-              status: data.status,
-              rank: data.rank,
-              rankBg: data.rankBg,
-              date: data.date,
-              seller: data.seller,
-              sellerUsername: data.sellerUsername,
-              description: data.description,
-              tags: data.tags,
-              likes: data.likes || 0,
-              views: data.views || 0,
-            });
+      unsubscribeFirestore = onSnapshot(q, (snapshot) => {
+        hasReceivedFirestoreData = true;
+        if (pollInterval) {
+          clearInterval(pollInterval);
+          pollInterval = null;
+        }
+
+        const itemsList: Product[] = [];
+        snapshot.forEach((docSnap) => {
+          const data = docSnap.data();
+          const img = data.imageUrl || data.image || undefined;
+          itemsList.push({
+            id: docSnap.id,
+            name: data.name,
+            category: data.category,
+            location: data.location,
+            price: data.price,
+            icon: data.icon || "fa-solid fa-box",
+            imageUrl: img,
+            image: img,
+            status: data.status,
+            rank: data.rank,
+            rankBg: data.rankBg,
+            date: data.date,
+            seller: data.seller,
+            sellerUsername: data.sellerUsername,
+            description: data.description,
+            tags: data.tags,
+            likes: data.likes || 0,
+            views: data.views || 0,
           });
-          saveLocalProducts(itemsList);
+        });
+        saveLocalProducts(itemsList);
+        if (!isUnsubscribed) {
           callback(itemsList);
-        } else {
-          // If items collection is empty, check fallback products collection
-          const qProd = query(collection(db, "products"), orderBy("date", "desc"));
-          getDocs(qProd).then((prodSnap) => {
-            if (!prodSnap.empty) {
-              const productsList: Product[] = [];
-              prodSnap.forEach((docSnap) => {
-                const data = docSnap.data();
-                const img = data.imageUrl || data.image || undefined;
-                productsList.push({
-                  id: docSnap.id,
-                  name: data.name,
-                  category: data.category,
-                  location: data.location,
-                  price: data.price,
-                  icon: data.icon,
-                  imageUrl: img,
-                  image: img,
-                  status: data.status,
-                  rank: data.rank,
-                  rankBg: data.rankBg,
-                  date: data.date,
-                  seller: data.seller,
-                  sellerUsername: data.sellerUsername,
-                  description: data.description,
-                  tags: data.tags,
-                  likes: data.likes || 0,
-                  views: data.views || 0,
-                });
-              });
-              saveLocalProducts(productsList);
-              callback(productsList);
-            } else {
-              fetchBackendProducts().then(success => {
-                if (!success) callback(getLocalProducts());
-              });
-            }
-          }).catch(() => {
-            fetchBackendProducts();
-          });
         }
       }, async (_err) => {
+        hasReceivedFirestoreData = false;
         const success = await fetchBackendProducts();
-        if (!success) callback(getLocalProducts());
+        if (!success && !isUnsubscribed) callback(getLocalProducts());
       });
-
-      return unsubscribe;
     } catch (e) {
       console.error("Firestore error, fallback to backend/localStorage:", e);
     }
   }
 
-  // Initial fetch from backend API
-  const success = await fetchBackendProducts();
-  if (!success) {
-    callback(getLocalProducts());
+  // Initial fetch from backend API only if Firestore hasn't responded yet
+  fetchBackendProducts().then(success => {
+    if (!success && !hasReceivedFirestoreData && !isUnsubscribed) {
+      callback(getLocalProducts());
+    }
+  });
+
+  // Fallback polling ONLY if Firestore is unavailable
+  if (!isFirebaseAvailable || !db) {
+    pollInterval = setInterval(() => {
+      if (!isUnsubscribed) {
+        fetchBackendProducts();
+      }
+    }, 2500);
   }
 
-  // Polling fallback
-  const pollInterval = setInterval(() => {
-    fetchBackendProducts();
-  }, 4000);
-
   return () => {
-    clearInterval(pollInterval);
+    isUnsubscribed = true;
+    if (pollInterval) {
+      clearInterval(pollInterval);
+    }
+    if (unsubscribeFirestore) {
+      unsubscribeFirestore();
+    }
   };
 };
 
@@ -562,7 +546,11 @@ export const addProduct = async (productData: Omit<Product, 'id'>): Promise<Prod
     }
   }
 
+  // Unified ID across Firestore and backend server
+  const unifiedId = `prod_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+
   const payload = {
+    id: unifiedId,
     ...productData,
     imageUrl: finalImageUrl,
     image: finalImageUrl,
@@ -571,9 +559,9 @@ export const addProduct = async (productData: Omit<Product, 'id'>): Promise<Prod
     date: productData.date || new Date().toISOString().split('T')[0]
   };
 
-  let createdProduct: Product | null = null;
+  let createdProduct: Product = { ...payload };
 
-  // 1. Send to Backend Server API first to ensure image is saved to static /uploads/ if needed
+  // 1. Send to Backend Server API first
   try {
     const res = await fetch(getApiUrl("/api/products"), {
       method: "POST",
@@ -584,51 +572,28 @@ export const addProduct = async (productData: Omit<Product, 'id'>): Promise<Prod
       const data = await res.json();
       if (data.success && data.product) {
         createdProduct = data.product;
-        // Keep persistent data URL or remote cloud URL, do not overwrite with ephemeral local /uploads/
-        if (createdProduct.imageUrl && !createdProduct.imageUrl.startsWith("/uploads/")) {
-          payload.imageUrl = createdProduct.imageUrl;
-          payload.image = createdProduct.imageUrl;
-        }
       }
     }
   } catch (err) {
     console.error("Backend addProduct error:", err);
   }
 
-  // 2. Save directly to Firestore 'items' collection with safe image URL
+  // 2. Save directly to Firestore 'items' and 'products' collections with the same unified ID
   if (isFirebaseAvailable && db) {
     try {
-      const docRef = await addDoc(collection(db, "items"), payload);
-      // Also write to products collection for cross-compatibility
+      await setDoc(doc(db, "items", unifiedId), payload);
       try {
-        await setDoc(doc(db, "products", docRef.id), payload);
+        await setDoc(doc(db, "products", unifiedId), payload);
       } catch {}
-
-      if (createdProduct) {
-        createdProduct.id = docRef.id;
-      } else {
-        createdProduct = {
-          id: docRef.id,
-          ...payload
-        };
-      }
-      console.log("Item saved to Firestore 'items' collection with ID:", docRef.id);
+      console.log("Item saved to Firestore with ID:", unifiedId);
     } catch (error) {
       console.error("Failed to add to Firestore 'items':", error);
     }
   }
 
-  // 3. Fallback if neither API succeeded
-  if (!createdProduct) {
-    createdProduct = {
-      id: `item_${Date.now()}`,
-      ...payload
-    };
-  }
-
   // Update local storage backup
   const locals = getLocalProducts();
-  const updatedLocals = [createdProduct, ...locals.filter(p => p.id !== createdProduct!.id)];
+  const updatedLocals = [createdProduct, ...locals.filter(p => String(p.id) !== String(createdProduct.id))];
   saveLocalProducts(updatedLocals);
 
   return createdProduct;
@@ -725,11 +690,12 @@ export const updateProductLikes = async (productId: string | number, isLiking: b
   }
 
   // Firestore update
-  if (isFirebaseAvailable && db && typeof productId === 'string') {
+  if (isFirebaseAvailable && db) {
     try {
-      const itemRef = doc(db, "items", productId);
+      const idStr = String(productId);
+      const itemRef = doc(db, "items", idStr);
       await updateDoc(itemRef, { likes: increment(incrementVal) }).catch(async () => {
-        const prodRef = doc(db, "products", productId);
+        const prodRef = doc(db, "products", idStr);
         await updateDoc(prodRef, { likes: increment(incrementVal) });
       });
     } catch (error) {
@@ -759,11 +725,12 @@ export const incrementProductViews = async (productId: string | number) => {
   }
 
   // Firestore update
-  if (isFirebaseAvailable && db && typeof productId === 'string') {
+  if (isFirebaseAvailable && db) {
     try {
-      const itemRef = doc(db, "items", productId);
+      const idStr = String(productId);
+      const itemRef = doc(db, "items", idStr);
       await updateDoc(itemRef, { views: increment(1) }).catch(async () => {
-        const prodRef = doc(db, "products", productId);
+        const prodRef = doc(db, "products", idStr);
         await updateDoc(prodRef, { views: increment(1) });
       });
     } catch (error) {
@@ -793,11 +760,12 @@ export const deleteProductFromDb = async (productId: string | number, deleterNam
   }
 
   // Firestore delete
-  if (isFirebaseAvailable && db && typeof productId === 'string') {
+  if (isFirebaseAvailable && db) {
     try {
-      const itemRef = doc(db, "items", productId);
+      const idStr = String(productId);
+      const itemRef = doc(db, "items", idStr);
       await deleteDoc(itemRef).catch(async () => {
-        const prodRef = doc(db, "products", productId);
+        const prodRef = doc(db, "products", idStr);
         await deleteDoc(prodRef);
       });
     } catch (error) {
@@ -811,243 +779,947 @@ export const deleteProductFromDb = async (productId: string | number, deleterNam
   saveLocalProducts(updated);
 };
 
-// -------------------------------------------------------------
-// FIRESTORE USER AUTHENTICATION & MEMBERSHIP MANAGEMENT
-// -------------------------------------------------------------
+// ----------------------------------------
+// FIRESTORE CHAT & MESSAGE SYSTEM
+// ----------------------------------------
 
-export interface FirestoreUser {
+export interface FirestoreChatParticipant {
+  username: string;
+  name: string;
+  location?: string;
+  avatarUrl?: string;
+}
+
+export interface FirestoreChatMessage {
+  id: string;
+  senderUsername: string;
+  senderName: string;
+  text: string;
+  imageUrl?: string;
+  timestamp: string;
+  createdAt: number;
+}
+
+export interface FirestoreChatRoom {
+  id: string;
+  productId?: string;
+  productName?: string;
+  productPrice?: string;
+  productIcon?: string;
+  participants: FirestoreChatParticipant[];
+  participantUsernames: string[];
+  lastMessage?: string;
+  lastTime?: string;
+  updatedAt: number;
+  messages?: FirestoreChatMessage[];
+}
+
+/**
+ * Real-time listener for all chat rooms where the given user is a participant.
+ */
+export const subscribeUserChatRooms = (
+  username: string,
+  callback: (rooms: FirestoreChatRoom[]) => void
+): (() => void) => {
+  if (!username) return () => {};
+  const cleanUsername = username.trim().toLowerCase();
+  const cacheKey = `yeonkeun_user_chat_rooms_${cleanUsername}`;
+
+  let isUnsubscribed = false;
+  let unsubscribeFirestore: (() => void) | null = null;
+  let cachedRoomsMap = new Map<string, FirestoreChatRoom>();
+
+  // 1. Load from local cache immediately for instant, flicker-free rendering
+  try {
+    const raw = localStorage.getItem(cacheKey);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        parsed.forEach((r: FirestoreChatRoom) => {
+          if (r && r.id) cachedRoomsMap.set(r.id, r);
+        });
+        callback(Array.from(cachedRoomsMap.values()));
+      }
+    }
+  } catch {}
+
+  const mergeAndNotify = (newRooms: FirestoreChatRoom[]) => {
+    if (isUnsubscribed) return;
+    newRooms.forEach((r) => {
+      if (!r || !r.id) return;
+      const existing = cachedRoomsMap.get(r.id);
+      if (!existing) {
+        cachedRoomsMap.set(r.id, r);
+      } else {
+        cachedRoomsMap.set(r.id, {
+          ...existing,
+          ...r,
+          participants: r.participants && r.participants.length > 0 ? r.participants : existing.participants,
+          participantUsernames: Array.from(new Set([...(existing.participantUsernames || []), ...(r.participantUsernames || [])])),
+          messages: (r.messages && r.messages.length >= (existing.messages?.length || 0)) ? r.messages : existing.messages,
+          lastMessage: r.lastMessage || existing.lastMessage,
+          lastTime: r.lastTime || existing.lastTime,
+          updatedAt: Math.max(r.updatedAt || 0, existing.updatedAt || 0)
+        });
+      }
+    });
+
+    const allRooms = Array.from(cachedRoomsMap.values());
+    allRooms.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+
+    try {
+      localStorage.setItem(cacheKey, JSON.stringify(allRooms));
+    } catch {}
+
+    callback(allRooms);
+  };
+
+  // 2. Fetch backend rooms
+  const fetchBackendRooms = async () => {
+    try {
+      const res = await fetch(getApiUrl(`/api/chats?username=${encodeURIComponent(username)}`));
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success && Array.isArray(data.rooms)) {
+          mergeAndNotify(data.rooms);
+        }
+      }
+    } catch (err) {
+      console.warn("Backend chat fetch fallback warning:", err);
+    }
+  };
+
+  // Run backend fetch immediately and every 5 seconds
+  fetchBackendRooms();
+  const pollInterval = setInterval(() => {
+    if (!isUnsubscribed) fetchBackendRooms();
+  }, 5000);
+
+  // 3. Firestore onSnapshot real-time listener
+  if (isFirebaseAvailable && db) {
+    try {
+      const q = query(
+        collection(db, "chats"),
+        where("participantUsernames", "array-contains", cleanUsername)
+      );
+
+      unsubscribeFirestore = onSnapshot(
+        q,
+        (snapshot) => {
+          const rooms: FirestoreChatRoom[] = [];
+          snapshot.forEach((docSnap) => {
+            const data = docSnap.data();
+            rooms.push({
+              id: docSnap.id,
+              productId: data.productId,
+              productName: data.productName,
+              productPrice: data.productPrice,
+              productIcon: data.productIcon,
+              participants: data.participants || [],
+              participantUsernames: data.participantUsernames || [],
+              lastMessage: data.lastMessage || "",
+              lastTime: data.lastTime || "방금 전",
+              updatedAt: data.updatedAt || 0,
+              messages: data.messages || []
+            });
+          });
+
+          mergeAndNotify(rooms);
+        },
+        (error) => {
+          console.warn("Firestore chat subscription error, relying on backend/cache:", error);
+          fetchBackendRooms();
+        }
+      );
+    } catch (e) {
+      console.error("Failed to initialize Firestore chat subscriber:", e);
+      fetchBackendRooms();
+    }
+  }
+
+  return () => {
+    isUnsubscribed = true;
+    clearInterval(pollInterval);
+    if (unsubscribeFirestore) {
+      unsubscribeFirestore();
+    }
+  };
+};
+
+/**
+ * Format timestamp in Korean Standard Time (KST, Asia/Seoul)
+ */
+export const formatKoreanChatTime = (date?: Date | number | string): string => {
+  if (!date) {
+    return new Date().toLocaleTimeString('ko-KR', {
+      timeZone: 'Asia/Seoul',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: true
+    });
+  }
+  if (typeof date === 'number') {
+    return new Date(date).toLocaleTimeString('ko-KR', {
+      timeZone: 'Asia/Seoul',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: true
+    });
+  }
+  if (typeof date === 'string') {
+    if (date.includes('T') || date.includes('-') || date.includes('Z')) {
+      const parsed = new Date(date);
+      if (!isNaN(parsed.getTime())) {
+        return parsed.toLocaleTimeString('ko-KR', {
+          timeZone: 'Asia/Seoul',
+          hour: '2-digit',
+          minute: '2-digit',
+          hour12: true
+        });
+      }
+    }
+    return date;
+  }
+  return date.toLocaleTimeString('ko-KR', {
+    timeZone: 'Asia/Seoul',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true
+  });
+};
+
+/**
+ * Real-time listener for messages in a specific chat room.
+ */
+export const subscribeRoomMessages = (
+  roomId: string,
+  callback: (messages: FirestoreChatMessage[]) => void
+): (() => void) => {
+  if (!roomId) return () => {};
+
+  let isUnsubscribed = false;
+  let unsubscribeFirestore: (() => void) | null = null;
+  let msgMap = new Map<string, FirestoreChatMessage>();
+
+  const emitMessages = () => {
+    const list = Array.from(msgMap.values());
+    list.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+    callback(list);
+  };
+
+  // Fallback / sync from backend
+  const fetchBackendMessages = async () => {
+    try {
+      const res = await fetch(getApiUrl(`/api/chats`));
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success && Array.isArray(data.rooms)) {
+          const room = data.rooms.find((r: any) => r.id === roomId);
+          if (room && Array.isArray(room.messages)) {
+            room.messages.forEach((m: any) => {
+              if (m && m.id) {
+                const kstTime = m.createdAt ? formatKoreanChatTime(m.createdAt) : formatKoreanChatTime(m.timestamp);
+                msgMap.set(m.id, { ...m, timestamp: kstTime });
+              }
+            });
+            emitMessages();
+          }
+        }
+      }
+    } catch {}
+  };
+
+  fetchBackendMessages();
+
+  if (isFirebaseAvailable && db) {
+    try {
+      const messagesRef = collection(db, "chats", roomId, "messages");
+      const q = query(messagesRef, orderBy("createdAt", "asc"));
+
+      unsubscribeFirestore = onSnapshot(
+        q,
+        (snapshot) => {
+          snapshot.forEach((docSnap) => {
+            const data = docSnap.data();
+            const kstTime = data.createdAt ? formatKoreanChatTime(data.createdAt) : formatKoreanChatTime(data.timestamp);
+            msgMap.set(docSnap.id, {
+              id: docSnap.id,
+              senderUsername: data.senderUsername,
+              senderName: data.senderName,
+              text: data.text || "",
+              imageUrl: data.imageUrl,
+              timestamp: kstTime,
+              createdAt: data.createdAt || Date.now()
+            });
+          });
+          if (!isUnsubscribed) {
+            emitMessages();
+          }
+        },
+        (error) => {
+          console.warn(`Firestore messages subscription error for room ${roomId}:`, error);
+        }
+      );
+    } catch (e) {
+      console.error(`Failed to setup messages subscriber for ${roomId}:`, e);
+    }
+  }
+
+  return () => {
+    isUnsubscribed = true;
+    if (unsubscribeFirestore) {
+      unsubscribeFirestore();
+    }
+  };
+};
+
+/**
+ * Get or create a 1:1 chat room in Firestore and sync with backend server.
+ */
+export const getOrCreateFirestoreChatRoom = async (params: {
+  myUsername: string;
+  myName: string;
+  myLocation?: string;
+  myAvatar?: string;
+  targetUsername: string;
+  targetName: string;
+  targetLocation?: string;
+  targetAvatar?: string;
+  productId?: string;
+  productName?: string;
+  productPrice?: string;
+  productIcon?: string;
+  initialMessage?: string;
+}): Promise<FirestoreChatRoom> => {
+  const cleanMyUsername = params.myUsername.trim().toLowerCase();
+  const cleanTargetUsername = params.targetUsername.trim().toLowerCase();
+
+  // 1. Sync with backend API
+  let serverRoom: FirestoreChatRoom | null = null;
+  try {
+    const res = await fetch(getApiUrl("/api/chats/room"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params)
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.success && data.room) {
+        serverRoom = data.room;
+      }
+    }
+  } catch (err) {
+    console.warn("Backend chat room creation error:", err);
+  }
+
+  // Determine standard room ID
+  const roomId = serverRoom?.id || `room_${params.productId || Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+
+  const participants: FirestoreChatParticipant[] = [
+    { username: params.myUsername.trim(), name: params.myName.trim(), location: params.myLocation || "기숙사", avatarUrl: params.myAvatar },
+    { username: params.targetUsername.trim(), name: params.targetName.trim(), location: params.targetLocation || "기숙사", avatarUrl: params.targetAvatar }
+  ];
+
+  // Comprehensive participant usernames list to ensure matching regardless of format
+  const participantUsernames = Array.from(new Set([
+    cleanMyUsername,
+    cleanTargetUsername,
+    params.myUsername.trim(),
+    params.targetUsername.trim(),
+    params.myName.trim(),
+    params.targetName.trim(),
+    params.myName.trim().toLowerCase(),
+    params.targetName.trim().toLowerCase()
+  ].filter(Boolean)));
+
+  const nowStr = formatKoreanChatTime();
+  const roomData: FirestoreChatRoom = {
+    id: roomId,
+    productId: params.productId ? String(params.productId) : undefined,
+    productName: params.productName || "물품 대화",
+    productPrice: params.productPrice || "무료",
+    productIcon: params.productIcon || "fa-solid fa-box",
+    participants,
+    participantUsernames,
+    lastMessage: params.initialMessage ? params.initialMessage.trim() : `'${params.productName || "물품"}' 대화를 시작했습니다.`,
+    lastTime: "방금 전",
+    updatedAt: Date.now(),
+    messages: []
+  };
+
+  // 2. Persist room in Firestore
+  if (isFirebaseAvailable && db) {
+    try {
+      const roomRef = doc(db, "chats", roomId);
+      const docSnap = await getDoc(roomRef);
+      if (!docSnap.exists()) {
+        await setDoc(roomRef, roomData, { merge: true });
+      } else {
+        // Update participants info and union usernames
+        const existingData = docSnap.data();
+        const existingUsernames = existingData.participantUsernames || [];
+        await updateDoc(roomRef, {
+          participants,
+          participantUsernames: Array.from(new Set([...existingUsernames, ...participantUsernames])),
+          updatedAt: Date.now()
+        });
+      }
+
+      // If initialMessage provided, add to subcollection
+      if (params.initialMessage && params.initialMessage.trim()) {
+        const msgId = `m_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`;
+        const msgDocRef = doc(db, "chats", roomId, "messages", msgId);
+        await setDoc(msgDocRef, {
+          id: msgId,
+          senderUsername: params.myUsername,
+          senderName: params.myName,
+          text: params.initialMessage.trim(),
+          timestamp: nowStr,
+          createdAt: Date.now()
+        });
+      }
+    } catch (err) {
+      console.error("Firestore chat room save error:", err);
+    }
+  }
+
+  // 3. Immediately update local storage cache for instant persistence across page/back nav
+  try {
+    const cacheKey = `yeonkeun_user_chat_rooms_${cleanMyUsername}`;
+    const raw = localStorage.getItem(cacheKey);
+    const list: FirestoreChatRoom[] = raw ? JSON.parse(raw) : [];
+    const filtered = list.filter(r => r.id !== roomId);
+    filtered.unshift(serverRoom || roomData);
+    localStorage.setItem(cacheKey, JSON.stringify(filtered));
+  } catch {}
+
+  return serverRoom || roomData;
+};
+
+/**
+ * Send a message to a chat room in Firestore and backend server.
+ */
+export const sendFirestoreChatMessage = async (params: {
+  roomId: string;
+  senderUsername: string;
+  senderName: string;
+  senderAvatar?: string;
+  senderLocation?: string;
+  targetUsername?: string;
+  targetName?: string;
+  targetAvatar?: string;
+  targetLocation?: string;
+  productName?: string;
+  productPrice?: string;
+  productIcon?: string;
+  text: string;
+  imageUrl?: string;
+}): Promise<FirestoreChatMessage> => {
+  const nowStr = formatKoreanChatTime();
+  const messageId = `m_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`;
+
+  const messageData: FirestoreChatMessage = {
+    id: messageId,
+    senderUsername: params.senderUsername,
+    senderName: params.senderName,
+    text: params.text || "",
+    imageUrl: params.imageUrl,
+    timestamp: nowStr,
+    createdAt: Date.now()
+  };
+
+  const displayLastMsg = params.imageUrl 
+    ? (params.text ? `📷 ${params.text}` : "📷 사진을 보냈습니다.")
+    : params.text;
+
+  const cleanSender = params.senderUsername.trim().toLowerCase();
+  const cleanTarget = (params.targetUsername || '').trim().toLowerCase();
+
+  const extraUsernames = [
+    cleanSender,
+    params.senderUsername.trim(),
+    params.senderName.trim(),
+    params.senderName.trim().toLowerCase(),
+    ...(cleanTarget ? [cleanTarget, params.targetUsername!.trim()] : []),
+    ...(params.targetName ? [params.targetName.trim(), params.targetName.trim().toLowerCase()] : [])
+  ].filter(Boolean);
+
+  // 1. Save directly to Firestore subcollection & update chat room doc
+  if (isFirebaseAvailable && db) {
+    try {
+      const messageDocRef = doc(db, "chats", params.roomId, "messages", messageId);
+      await setDoc(messageDocRef, messageData);
+
+      const roomDocRef = doc(db, "chats", params.roomId);
+      const roomSnap = await getDoc(roomDocRef).catch(() => null);
+
+      if (roomSnap && roomSnap.exists()) {
+        const data = roomSnap.data();
+        const existingPUsernames: string[] = data.participantUsernames || [];
+        const updatedPUsernames = Array.from(new Set([
+          ...existingPUsernames, 
+          ...extraUsernames
+        ]));
+        await updateDoc(roomDocRef, {
+          lastMessage: displayLastMsg,
+          lastTime: "방금 전",
+          updatedAt: Date.now(),
+          participantUsernames: updatedPUsernames
+        });
+      } else {
+        const participants: FirestoreChatParticipant[] = [
+          { 
+            username: params.senderUsername, 
+            name: params.senderName, 
+            location: params.senderLocation || "기숙사",
+            avatarUrl: params.senderAvatar
+          }
+        ];
+        if (params.targetUsername && params.targetName) {
+          participants.push({
+            username: params.targetUsername,
+            name: params.targetName,
+            location: params.targetLocation || "기숙사",
+            avatarUrl: params.targetAvatar
+          });
+        }
+
+        await setDoc(roomDocRef, {
+          id: params.roomId,
+          productName: params.productName || "물품 대화",
+          productPrice: params.productPrice || "무료",
+          productIcon: params.productIcon || "fa-solid fa-box",
+          lastMessage: displayLastMsg,
+          lastTime: "방금 전",
+          updatedAt: Date.now(),
+          participantUsernames: Array.from(new Set(extraUsernames)),
+          participants
+        }, { merge: true });
+      }
+    } catch (err) {
+      console.error("Firestore message send error:", err);
+    }
+  }
+
+  // 2. Sync with backend API
+  try {
+    await fetch(getApiUrl(`/api/chats/${params.roomId}/messages`), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        senderUsername: params.senderUsername,
+        senderName: params.senderName,
+        text: params.text,
+        imageUrl: params.imageUrl
+      })
+    });
+  } catch (err) {
+    console.warn("Backend chat message sync error:", err);
+  }
+
+  // 3. Update local cache immediately
+  try {
+    const cacheKey = `yeonkeun_user_chat_rooms_${cleanSender}`;
+    const raw = localStorage.getItem(cacheKey);
+    if (raw) {
+      const list: FirestoreChatRoom[] = JSON.parse(raw);
+      const idx = list.findIndex(r => r.id === params.roomId);
+      if (idx !== -1) {
+        list[idx].lastMessage = displayLastMsg;
+        list[idx].lastTime = "방금 전";
+        list[idx].updatedAt = Date.now();
+        list[idx].messages = [...(list[idx].messages || []), messageData];
+        localStorage.setItem(cacheKey, JSON.stringify(list));
+      }
+    }
+  } catch {}
+
+  return messageData;
+};
+
+// ----------------------------------------
+// FIRESTORE ALL REGISTERED USERS MANAGEMENT
+// ----------------------------------------
+
+export interface FirestoreUserData {
   id: string;
   username: string;
   password?: string;
   name: string;
   location: string;
   role: 'admin' | 'user';
-  avatarUrl: string;
+  avatarUrl?: string;
   createdAt: string;
   lastLoginAt?: string;
 }
 
-// Initial admin & sample accounts to guarantee they exist in Firestore
-export const DEFAULT_SYSTEM_ACCOUNTS: FirestoreUser[] = [
-  {
-    id: "user_sys_admin_9842",
-    username: "sys_admin_yeonkeun_9842",
-    password: "YK#DormAdmin!2026$Secure",
-    name: "시스템 최고 관리자",
-    location: "제1기숙사 A동 302호",
-    role: "admin",
-    avatarUrl: "https://i.ibb.co/tTvSdxFv/samplepic2.png",
-    createdAt: "2026-01-01T00:00:00.000Z",
-    lastLoginAt: new Date().toISOString()
-  },
-  {
-    id: "user_1789468611691_gyoee",
-    username: "terry3305",
-    password: "1234asdf!!",
-    name: "김태인",
-    location: "제1기숙사 A동 302호",
-    role: "user",
-    avatarUrl: "https://i.ibb.co/tTvSdxFv/samplepic2.png",
-    createdAt: "2026-09-15T10:36:51.691Z",
-    lastLoginAt: new Date().toISOString()
-  }
-];
-
 /**
- * Automatically seeds default users to Firestore on load
+ * Save newly registered or logged-in user profile to Firestore globally
  */
-export const seedInitialUsersToFirestore = async () => {
-  if (!isFirebaseAvailable || !db) return;
-  try {
-    for (const acc of DEFAULT_SYSTEM_ACCOUNTS) {
-      const userRef = doc(db, "users", acc.username.toLowerCase());
-      const existing = await getDoc(userRef);
-      if (!existing.exists()) {
-        await setDoc(userRef, acc);
+export const saveFirestoreUser = async (user: Partial<FirestoreUserData> & { username: string; password?: string }): Promise<void> => {
+  if (!user || !user.username) return;
+  const cleanUsername = user.username.trim().toLowerCase();
+  
+  if (isFirebaseAvailable && db) {
+    try {
+      const userDocRef = doc(db, "users", cleanUsername);
+      const userPayload: any = {
+        id: user.id || `user_${Date.now()}`,
+        username: user.username.trim(),
+        name: user.name ? user.name.trim() : user.username.trim(),
+        location: user.location || "제1기숙사 A동 302호",
+        role: user.role || (cleanUsername === 'sys_admin_yeonkeun_9842' ? 'admin' : 'user'),
+        avatarUrl: user.avatarUrl || '',
+        createdAt: user.createdAt || new Date().toISOString(),
+        lastLoginAt: user.lastLoginAt || new Date().toISOString()
+      };
+      if (user.password) {
+        userPayload.password = user.password;
       }
+      await setDoc(userDocRef, userPayload, { merge: true });
+    } catch (err) {
+      console.warn("Firestore save user warning:", err);
     }
-  } catch (err) {
-    console.warn("Firestore user seeding note:", err);
   }
 };
 
-// Trigger background seeding if Firebase is ready
-if (isFirebaseAvailable && db) {
-  seedInitialUsersToFirestore().catch(() => {});
-}
-
 /**
- * Check if a username is available directly in Firestore.
+ * Check if a username is available in Firestore (Used when backend API is unavailable)
  */
-export const checkUsernameInFirestore = async (username: string): Promise<{ available: boolean; message: string }> => {
+export const checkUsernameAvailabilityFirestore = async (
+  username: string
+): Promise<{ available: boolean; message?: string }> => {
   const clean = username.trim().toLowerCase();
   if (!clean) {
-    return { available: false, message: "아이디를 입력해주세요." };
+    return { available: false, message: '아이디를 입력해주세요.' };
+  }
+  if (clean === 'sys_admin_yeonkeun_9842' || clean === 'admin') {
+    return { available: false, message: '이미 존재하는 관리자 계정 아이디입니다.' };
+  }
+  if (!isFirebaseAvailable || !db) {
+    try {
+      const hist = JSON.parse(localStorage.getItem('yeongeun_logged_in_history') || '[]');
+      const exists = hist.some((u: any) => u.username?.toLowerCase() === clean);
+      return exists
+        ? { available: false, message: '이미 사용 중인 아이디입니다.' }
+        : { available: true };
+    } catch {
+      return { available: true };
+    }
   }
 
-  // 1. Direct Firestore lookup (instant, resilient across all cloud environments)
+  try {
+    const userDoc = await getDoc(doc(db, "users", clean));
+    if (userDoc.exists()) {
+      return { available: false, message: '이미 등록된 아이디입니다.' };
+    }
+    return { available: true };
+  } catch (err) {
+    console.warn("Firestore check username error:", err);
+    return { available: true };
+  }
+};
+
+/**
+ * Direct Login via Firestore (Vercel 및 서버리스 배포 단독 구동 지원)
+ */
+export const loginFirestoreUser = async (
+  usernameInput: string,
+  passwordInput: string
+): Promise<{ success: boolean; message?: string; user?: any; personalData?: any }> => {
+  const clean = usernameInput.trim().toLowerCase();
+  
+  // 1. 최고 관리자 계정 상시 인증 보장
+  if (clean === 'sys_admin_yeonkeun_9842') {
+    if (passwordInput === 'YK#DormAdmin!2026$Secure') {
+      const adminUser = {
+        id: "user_sys_admin_9842",
+        username: "sys_admin_yeonkeun_9842",
+        password: "YK#DormAdmin!2026$Secure",
+        name: "시스템 최고 관리자",
+        location: "중앙 기숙사 관리실",
+        role: "admin" as const,
+        avatarUrl: "https://i.ibb.co/YTTbzcmw/samplepic1.png",
+        createdAt: "2026-01-01T00:00:00Z",
+        lastLoginAt: new Date().toISOString()
+      };
+      saveFirestoreUser(adminUser).catch(() => {});
+      return {
+        success: true,
+        user: adminUser,
+        personalData: { wishlist: [] }
+      };
+    } else {
+      return {
+        success: false,
+        message: '최고 관리자 비밀번호가 일치하지 않습니다.'
+      };
+    }
+  }
+
+  // 2. Firestore에서 유저 문서 조회
   if (isFirebaseAvailable && db) {
     try {
       const userRef = doc(db, "users", clean);
       const userSnap = await getDoc(userRef);
       if (userSnap.exists()) {
-        return { available: false, message: "중복되는 아이디가 존재합니다. 다른 아이디를 입력해주세요." };
+        const u = userSnap.data();
+        if (u.password && u.password !== passwordInput) {
+          return {
+            success: false,
+            message: '비밀번호가 일치하지 않습니다. 다시 확인해주세요.'
+          };
+        }
+
+        const updatedUser = {
+          id: u.id || `user_${clean}`,
+          username: u.username || clean,
+          name: u.name || clean,
+          location: u.location || "제1기숙사 A동 302호",
+          role: (u.role || 'user') as 'admin' | 'user',
+          avatarUrl: u.avatarUrl || '',
+          createdAt: u.createdAt || new Date().toISOString(),
+          lastLoginAt: new Date().toISOString()
+        };
+        await setDoc(userRef, { lastLoginAt: updatedUser.lastLoginAt }, { merge: true }).catch(() => {});
+
+        return {
+          success: true,
+          user: updatedUser,
+          personalData: { wishlist: [] }
+        };
       }
-      return { available: true, message: "사용 가능한 아이디입니다!" };
-    } catch (err) {
-      console.warn("Firestore checkUsername warning, falling back to API:", err);
+    } catch (e) {
+      console.warn("Firestore direct login attempt error:", e);
     }
   }
 
-  // 2. Fallback to API if Firestore is not directly reachable
+  // 3. 로컬 스토리지 백업 확인
   try {
-    const res = await fetch(getApiUrl("/api/auth/check-username"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username: clean })
-    });
-    if (res.ok) {
-      const data = await res.json();
+    const saved = localStorage.getItem('yeongeun_current_user');
+    if (saved) {
+      const u = JSON.parse(saved);
+      if (u.username?.toLowerCase() === clean) {
+        if (u.password && u.password !== passwordInput) {
+          return { success: false, message: '비밀번호가 일치하지 않습니다.' };
+        }
+        return {
+          success: true,
+          user: u,
+          personalData: { wishlist: [] }
+        };
+      }
+    }
+    const hist = JSON.parse(localStorage.getItem('yeongeun_logged_in_history') || '[]');
+    const match = hist.find((h: any) => h.username?.toLowerCase() === clean);
+    if (match) {
+      if (match.password && match.password !== passwordInput) {
+        return { success: false, message: '비밀번호가 일치하지 않습니다.' };
+      }
       return {
-        available: !!data.available,
-        message: data.message || (data.available ? "사용 가능한 아이디입니다!" : "중복되는 아이디가 존재합니다.")
+        success: true,
+        user: match,
+        personalData: { wishlist: [] }
       };
     }
   } catch {}
 
-  // 3. Fallback to default local accounts
-  const taken = DEFAULT_SYSTEM_ACCOUNTS.some(a => a.username.toLowerCase() === clean);
   return {
-    available: !taken,
-    message: taken ? "중복되는 아이디가 존재합니다. 다른 아이디를 입력해주세요." : "사용 가능한 아이디입니다!"
+    success: false,
+    message: '등록되지 않은 아이디입니다. 회원가입을 먼저 진행해 주세요.'
   };
 };
 
 /**
- * Register a user directly in Firestore.
+ * Direct Register via Firestore (Vercel 및 서버리스 배포 단독 구동 지원)
  */
-export const registerUserInFirestore = async (userData: {
+export const registerFirestoreUser = async (userData: {
   username: string;
   password: string;
   name: string;
   location: string;
-  avatarUrl: string;
-}): Promise<{ success: boolean; user?: FirestoreUser; message?: string }> => {
-  const cleanUsername = userData.username.trim();
-  const cleanKey = cleanUsername.toLowerCase();
+  avatarUrl?: string;
+}): Promise<{ success: boolean; message?: string; user?: any }> => {
+  const clean = userData.username.trim().toLowerCase();
+  
+  if (clean === 'sys_admin_yeonkeun_9842') {
+    return { success: false, message: '해당 아이디는 예약된 시스템 관리자 계정입니다.' };
+  }
 
-  const newUser: FirestoreUser = {
+  const newUser: FirestoreUserData = {
     id: `user_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-    username: cleanUsername,
+    username: userData.username.trim(),
     password: userData.password,
     name: userData.name.trim(),
-    location: userData.location,
-    role: "user",
-    avatarUrl: userData.avatarUrl,
+    location: userData.location || "제1기숙사 A동 302호",
+    role: 'user',
+    avatarUrl: userData.avatarUrl || '',
     createdAt: new Date().toISOString(),
     lastLoginAt: new Date().toISOString()
   };
 
-  // 1. Direct Firestore write
   if (isFirebaseAvailable && db) {
     try {
-      const userRef = doc(db, "users", cleanKey);
-      const snap = await getDoc(userRef);
-      if (snap.exists()) {
-        return { success: false, message: "이미 사용 중인 아이디입니다." };
+      const userRef = doc(db, "users", clean);
+      const existing = await getDoc(userRef);
+      if (existing.exists()) {
+        return { success: false, message: '이미 등록된 아이디입니다.' };
       }
       await setDoc(userRef, newUser);
-      
-      // Also notify backend in background if available
-      fetch(getApiUrl("/api/auth/register"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(userData)
-      }).catch(() => {});
-
-      return { success: true, user: newUser };
     } catch (err: any) {
-      console.warn("Firestore register warning, trying backend:", err);
+      console.warn("Firestore register user warning:", err);
     }
   }
 
-  // 2. Fallback to backend API
+  return {
+    success: true,
+    user: newUser
+  };
+};
+
+/**
+ * Fetch all registered and active users from Firestore (users + products sellers + chats participants)
+ */
+export const getFirestoreUsers = async (): Promise<FirestoreUserData[]> => {
+  if (!isFirebaseAvailable || !db) return [];
   try {
-    const res = await fetch(getApiUrl("/api/auth/register"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(userData)
-    });
-    const data = await res.json();
-    return data;
-  } catch (err: any) {
-    return { success: false, message: err?.message || "회원가입 처리 중 오류가 발생했습니다." };
+    const userMap = new Map<string, FirestoreUserData>();
+
+    // 1. users 컬렉션 직접 조회
+    try {
+      const snap = await getDocs(collection(db, "users"));
+      snap.forEach((d) => {
+        const data = d.data();
+        if (data && data.username) {
+          const clean = data.username.trim().toLowerCase();
+          if (!clean.startsWith("testrandomavatar") && data.name !== "테스트유저") {
+            userMap.set(clean, {
+              id: data.id || d.id,
+              username: data.username,
+              password: data.password || undefined,
+              name: data.name || data.username,
+              location: data.location || "제1기숙사 A동 302호",
+              role: data.role || (clean === 'sys_admin_yeonkeun_9842' ? 'admin' : 'user'),
+              avatarUrl: data.avatarUrl || '',
+              createdAt: data.createdAt || new Date().toISOString(),
+              lastLoginAt: data.lastLoginAt || data.createdAt || new Date().toISOString()
+            });
+          }
+        }
+      });
+    } catch {}
+
+    // 2. products 컬렉션에서 판매자 자동 발굴
+    try {
+      const prodSnap = await getDocs(collection(db, "products"));
+      prodSnap.forEach((d) => {
+        const p = d.data();
+        const sellerUsername = (p.sellerUsername || p.seller || "").trim();
+        if (sellerUsername) {
+          const clean = sellerUsername.toLowerCase();
+          if (!clean.startsWith("testrandomavatar") && p.seller !== "테스트유저") {
+            if (!userMap.has(clean)) {
+              userMap.set(clean, {
+                id: `u_${clean}`,
+                username: sellerUsername,
+                name: p.seller || sellerUsername,
+                location: p.location || "기숙사",
+                role: clean === 'sys_admin_yeonkeun_9842' ? 'admin' : 'user',
+                avatarUrl: p.sellerAvatar || '',
+                createdAt: p.createdAt ? new Date(p.createdAt).toISOString() : new Date().toISOString(),
+                lastLoginAt: new Date().toISOString()
+              });
+            }
+          }
+        }
+      });
+    } catch {}
+
+    // 3. chats 컬렉션에서 참여자 자동 발굴
+    try {
+      const chatSnap = await getDocs(collection(db, "chats"));
+      chatSnap.forEach((d) => {
+        const c = d.data();
+        if (Array.isArray(c.participants)) {
+          c.participants.forEach((p: any) => {
+            const uName = (p.username || p.name || "").trim();
+            if (uName) {
+              const clean = uName.toLowerCase();
+              if (!clean.startsWith("testrandomavatar") && p.name !== "테스트유저") {
+                if (!userMap.has(clean)) {
+                  userMap.set(clean, {
+                    id: `u_${clean}`,
+                    username: p.username || p.name,
+                    name: p.name || p.username,
+                    location: p.location || "기숙사",
+                    role: clean === 'sys_admin_yeonkeun_9842' ? 'admin' : 'user',
+                    avatarUrl: p.avatarUrl || '',
+                    createdAt: new Date().toISOString(),
+                    lastLoginAt: new Date().toISOString()
+                  });
+                }
+              }
+            }
+          });
+        }
+      });
+    } catch {}
+
+    return Array.from(userMap.values());
+  } catch (err) {
+    console.warn("Firestore get users error:", err);
+    return [];
   }
 };
 
 /**
- * Login user directly via Firestore.
+ * Real-time subscription to all registered users in Firestore
  */
-export const loginUserInFirestore = async (
-  username: string,
-  password: string
-): Promise<{ success: boolean; user?: FirestoreUser; personalData?: any; message?: string }> => {
-  const cleanUsername = username.trim();
-  const cleanKey = cleanUsername.toLowerCase();
-
-  // 1. Try Firestore direct authentication
-  if (isFirebaseAvailable && db) {
-    try {
-      const userRef = doc(db, "users", cleanKey);
-      let snap = await getDoc(userRef);
-      
-      // If user not in Firestore yet, check default accounts and seed
-      if (!snap.exists()) {
-        const defaultAcc = DEFAULT_SYSTEM_ACCOUNTS.find(a => a.username.toLowerCase() === cleanKey);
-        if (defaultAcc) {
-          await setDoc(userRef, defaultAcc);
-          snap = await getDoc(userRef);
-        }
-      }
-
-      if (snap.exists()) {
-        const user = snap.data() as FirestoreUser;
-        if (user.password !== password) {
-          return { success: false, message: "비밀번호가 일치하지 않습니다." };
-        }
-        // Update last login
-        const now = new Date().toISOString();
-        updateDoc(userRef, { lastLoginAt: now }).catch(() => {});
-        const safeUser = { ...user, lastLoginAt: now };
-        delete (safeUser as any).password;
-
-        // Also notify backend in background if available
-        fetch(getApiUrl("/api/auth/login"), {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ username, password })
-        }).catch(() => {});
-
-        return { success: true, user: safeUser };
-      } else {
-        return { success: false, message: "존재하지 않는 아이디입니다." };
-      }
-    } catch (err) {
-      console.warn("Firestore login failed, trying API fallback:", err);
-    }
-  }
-
-  // 2. Fallback to API
+export const subscribeFirestoreUsers = (
+  callback: (users: FirestoreUserData[]) => void
+): (() => void) => {
+  if (!isFirebaseAvailable || !db) return () => {};
   try {
-    const res = await fetch(getApiUrl("/api/auth/login"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username: cleanUsername, password })
+    const unsub = onSnapshot(collection(db, "users"), (snapshot) => {
+      const users: FirestoreUserData[] = [];
+      snapshot.forEach((d) => {
+        const data = d.data();
+        if (data && data.username) {
+          users.push({
+            id: data.id || d.id,
+            username: data.username,
+            password: data.password || undefined,
+            name: data.name || data.username,
+            location: data.location || "제1기숙사 A동 302호",
+            role: data.role || (data.username === 'sys_admin_yeonkeun_9842' ? 'admin' : 'user'),
+            avatarUrl: data.avatarUrl || '',
+            createdAt: data.createdAt || new Date().toISOString(),
+            lastLoginAt: data.lastLoginAt || data.createdAt || new Date().toISOString()
+          });
+        }
+      });
+      callback(users);
+    }, (err) => {
+      console.warn("Firestore users subscription error:", err);
     });
-    const data = await res.json();
-    return data;
-  } catch (err: any) {
-    return { success: false, message: err?.message || "로그인 처리 중 오류가 발생했습니다." };
+    return unsub;
+  } catch (e) {
+    console.warn("Failed to subscribe to Firestore users:", e);
+    return () => {};
   }
 };
+
+/**
+ * Delete a user profile from Firestore
+ */
+export const deleteFirestoreUser = async (usernameOrId: string): Promise<void> => {
+  if (!isFirebaseAvailable || !db || !usernameOrId) return;
+  try {
+    const clean = usernameOrId.trim().toLowerCase();
+    await deleteDoc(doc(db, "users", clean)).catch(() => {});
+  } catch (err) {
+    console.warn("Firestore delete user error:", err);
+  }
+};
+
 

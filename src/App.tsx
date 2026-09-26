@@ -19,9 +19,18 @@ import {
   getOrUploadHomeBanner,
   getOrUploadSampleAvatars,
   saveLocalProducts,
-  checkUsernameInFirestore,
-  registerUserInFirestore,
-  loginUserInFirestore,
+  subscribeUserChatRooms,
+  subscribeRoomMessages,
+  getOrCreateFirestoreChatRoom,
+  sendFirestoreChatMessage,
+  saveFirestoreUser,
+  getFirestoreUsers,
+  subscribeFirestoreUsers,
+  deleteFirestoreUser,
+  checkUsernameAvailabilityFirestore,
+  loginFirestoreUser,
+  registerFirestoreUser,
+  formatKoreanChatTime,
   Product 
 } from './firebase';
 import { compressImage } from './utils/imageCompressor';
@@ -45,6 +54,7 @@ export interface ChatPartner {
   name: string;
   room: string;
   avatar: string;
+  partnerUsername?: string;
   productName: string;
   productPrice: string;
   productIcon: string;
@@ -58,6 +68,7 @@ export interface ChatPartner {
 export default function App() {
   const [showSplash, setShowSplash] = useState(true);
   const [splashMounted, setSplashMounted] = useState(true);
+  const [showAdPopup, setShowAdPopup] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [activeSearch, setActiveSearch] = useState('');
   const [showDropdown, setShowDropdown] = useState(false);
@@ -127,86 +138,73 @@ export default function App() {
       return;
     }
 
+    // 판매자 아이디 추출 (없을 경우 seller 이름을 기반으로 식별 가능한 영문/숫자 아이디 생성)
+    const cleanSellerUsername = (product.sellerUsername || '').trim() || 
+      `user_${encodeURIComponent(sellerName.replace(/\s+/g, '_')).replace(/%/g, '').toLowerCase().substring(0, 15) || 'seller'}`;
+
     try {
-      const res = await fetch(getApiUrl("/api/chats/room"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          myUsername: currentUser.username,
-          myName: currentUser.name,
-          myLocation: currentUser.location,
-          myAvatar: currentUser.avatarUrl,
-          targetUsername: product.sellerUsername,
-          targetName: sellerName,
-          targetLocation: product.location,
-          productId: String(product.id),
-          productName: product.name,
-          productPrice: product.price,
-          productIcon: product.icon || 'fa-solid fa-box',
-          initialMessage: ""
-        })
+      const room = await getOrCreateFirestoreChatRoom({
+        myUsername: currentUser.username,
+        myName: currentUser.name,
+        myLocation: currentUser.location,
+        myAvatar: currentUser.avatarUrl,
+        targetUsername: cleanSellerUsername,
+        targetName: sellerName,
+        targetLocation: product.location,
+        productId: String(product.id),
+        productName: product.name,
+        productPrice: product.price,
+        productIcon: product.icon || 'fa-solid fa-box',
+        initialMessage: ""
       });
 
-      if (res.ok) {
-        const data = await res.json();
-        if (data.success && data.room) {
-          const room = data.room;
-          const counterpart = room.participants.find((p: any) => 
-            p.username && p.username.trim().toLowerCase() !== currentUser.username.trim().toLowerCase()
-          ) || room.participants.find((p: any) => p.name !== currentUser.name) || room.participants[1] || room.participants[0];
+      if (room) {
+        const counterpart = (room.participants || []).find((p: any) => 
+          p.username && p.username.trim().toLowerCase() !== currentUser.username.trim().toLowerCase()
+        ) || (room.participants || []).find((p: any) => p.name !== currentUser.name) || (room.participants || [])[1] || (room.participants || [])[0] || { name: sellerName, location: product.location, avatarUrl: '', username: cleanSellerUsername };
 
-          const partnerObj: ChatPartner = {
-            id: room.id,
-            name: `${counterpart.name} (${counterpart.location || '기숙사'})`,
-            room: counterpart.location || '기숙사',
-            avatar: counterpart.avatarUrl || DEFAULT_AVATAR,
-            productName: room.productName,
-            productPrice: room.productPrice,
-            productIcon: room.productIcon,
-            lastMessage: room.lastMessage,
-            lastTime: room.lastTime || '방금 전',
-            unreadCount: 0,
-            mannerTemp: 36.5,
-            messages: (room.messages || []).map((m: any) => ({
-              id: m.id,
-              sender: (m.senderUsername && m.senderUsername.trim().toLowerCase() === currentUser.username.trim().toLowerCase()) ? 'me' : 'partner',
-              text: m.text,
-              timestamp: m.timestamp,
-              imageUrl: m.imageUrl
-            }))
-          };
+        const partnerObj: ChatPartner = {
+          id: room.id,
+          partnerUsername: (counterpart as any).username || cleanSellerUsername,
+          name: `${counterpart.name} (${counterpart.location || '기숙사'})`,
+          room: counterpart.location || '기숙사',
+          avatar: counterpart.avatarUrl || DEFAULT_AVATAR,
+          productName: room.productName || product.name,
+          productPrice: room.productPrice || product.price,
+          productIcon: room.productIcon || product.icon || 'fa-solid fa-box',
+          lastMessage: room.lastMessage || '',
+          lastTime: room.lastTime || '방금 전',
+          unreadCount: 0,
+          mannerTemp: 36.5,
+          messages: (room.messages || []).map((m: any) => ({
+            id: m.id,
+            sender: (m.senderUsername && m.senderUsername.trim().toLowerCase() === currentUser.username.trim().toLowerCase()) ? 'me' : 'partner',
+            text: m.text,
+            timestamp: m.createdAt ? formatKoreanChatTime(m.createdAt) : formatKoreanChatTime(m.timestamp),
+            imageUrl: m.imageUrl
+          }))
+        };
 
-          setSelectedChatPartner(partnerObj);
-          setChatPartners(prev => {
-            const filtered = prev.filter(p => p.id !== partnerObj.id);
-            return [partnerObj, ...filtered];
-          });
-          setCurrentView('chat');
-          return;
-        } else if (!data.success && data.message) {
-          alert(data.message);
-          return;
-        }
-      } else {
-        const errData = await res.json().catch(() => ({}));
-        if (errData.message) {
-          alert(errData.message);
-          return;
-        }
+        setSelectedChatPartner(partnerObj);
+        setChatPartners(prev => {
+          const filtered = prev.filter(p => p.id !== partnerObj.id);
+          return [partnerObj, ...filtered];
+        });
+        setCurrentView('chat');
       }
     } catch (err) {
       console.error("Start chat error:", err);
     }
   };
 
-  // 메시지 전송 처리 (자동 답장 완전 제거, 실시간 서버 전송)
+  // 메시지 전송 처리 (Firestore 실시간 저장 및 백엔드 동기화)
   const handleSendMessage = async (attachedImage?: string) => {
     const imgToSend = attachedImage || chatImagePreview;
     const sendText = chatInputText.trim();
     if (!sendText && !imgToSend) return;
     if (!selectedChatPartner) return;
 
-    const nowStr = new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
+    const nowStr = formatKoreanChatTime();
     setChatInputText('');
     setChatImagePreview(null);
 
@@ -229,30 +227,35 @@ export default function App() {
     };
 
     setSelectedChatPartner(updatedPartner);
-    setChatPartners(prev => prev.map(p => p.id === updatedPartner.id ? updatedPartner : p));
+    setChatPartners(prev => {
+      const idx = prev.findIndex(p => p.id === updatedPartner.id);
+      if (idx !== -1) {
+        return prev.map(p => p.id === updatedPartner.id ? updatedPartner : p);
+      }
+      return [updatedPartner, ...prev];
+    });
 
-    // 백엔드 서버에 실제 메시지 저장
+    // Firestore 및 백엔드 서버에 실제 메시지 저장
     if (currentUser) {
       try {
-        const res = await fetch(getApiUrl(`/api/chats/${selectedChatPartner.id}/messages`), {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            senderUsername: currentUser.username,
-            senderName: currentUser.name,
-            text: sendText,
-            imageUrl: imgToSend || undefined
-          })
+        await sendFirestoreChatMessage({
+          roomId: selectedChatPartner.id,
+          senderUsername: currentUser.username,
+          senderName: currentUser.name,
+          senderAvatar: currentUser.avatarUrl,
+          senderLocation: currentUser.location,
+          targetUsername: selectedChatPartner.partnerUsername,
+          targetName: selectedChatPartner.name,
+          targetAvatar: selectedChatPartner.avatar,
+          targetLocation: selectedChatPartner.room,
+          productName: selectedChatPartner.productName,
+          productPrice: selectedChatPartner.productPrice,
+          productIcon: selectedChatPartner.productIcon,
+          text: sendText,
+          imageUrl: imgToSend || undefined
         });
-
-        if (!res.ok) {
-          const errData = await res.json().catch(() => ({}));
-          if (res.status === 403) {
-            alert(errData.message || "해당 대화방의 참여자만 메시지를 전송할 수 있습니다.");
-          }
-        }
       } catch (err) {
-        console.error("Failed to send chat message:", err);
+        console.error("Failed to send chat message to Firestore:", err);
       }
     }
   };
@@ -270,6 +273,7 @@ export default function App() {
   // 물품 첨부 이미지 상태
   const [uploadedImage, setUploadedImage] = useState<string | null>(null);
   const [isUploadingImage, setIsUploadingImage] = useState<boolean>(false);
+  const [isSubmittingProduct, setIsSubmittingProduct] = useState<boolean>(false);
 
   // 태그 추가 및 삭제 핸들러
   const handleAddTag = (rawText?: string) => {
@@ -348,74 +352,115 @@ export default function App() {
     return new Set();
   });
 
-  // 내 로그인 계정의 실시간 대화방 목록 동기화 (Polling every 2.5s)
+  // 내 로그인 계정의 실시간 대화방 목록 동기화 (Firestore onSnapshot 실시간 수신 + fallback)
   useEffect(() => {
     if (!currentUser) {
       setChatPartners([]);
       return;
     }
 
-    const fetchUserChatRooms = async () => {
-      try {
-        const res = await fetch(getApiUrl(`/api/chats?username=${encodeURIComponent(currentUser.username)}&name=${encodeURIComponent(currentUser.name)}`));
-        if (res.ok) {
-          const data = await res.json();
-          if (data.success && Array.isArray(data.rooms)) {
-            const partners: ChatPartner[] = data.rooms.map((room: any) => {
-              const counterpart = room.participants.find((p: any) => 
-                p.username && p.username.trim().toLowerCase() !== currentUser.username.trim().toLowerCase()
-              ) || room.participants.find((p: any) => p.name !== currentUser.name) || room.participants[0] || { name: '상대방', location: '기숙사', avatarUrl: '' };
+    const unsubscribeRooms = subscribeUserChatRooms(currentUser.username, (rooms) => {
+      const partners: ChatPartner[] = rooms.map((room: any) => {
+        const counterpart = (room.participants || []).find((p: any) => 
+          p.username && p.username.trim().toLowerCase() !== currentUser.username.trim().toLowerCase()
+        ) || (room.participants || []).find((p: any) => p.name !== currentUser.name) || (room.participants || [])[0] || { name: '상대방', location: '기숙사', avatarUrl: '' };
 
-              const parsedMessages = (room.messages || []).map((m: any) => ({
-                id: m.id,
-                sender: (m.senderUsername && m.senderUsername.trim().toLowerCase() === currentUser.username.trim().toLowerCase()) ? 'me' : 'partner',
-                text: m.text,
-                timestamp: m.timestamp,
-                imageUrl: m.imageUrl
-              }));
+        const parsedMessages = (room.messages || []).map((m: any) => ({
+          id: m.id,
+          sender: (m.senderUsername && m.senderUsername.trim().toLowerCase() === currentUser.username.trim().toLowerCase()) ? 'me' : 'partner',
+          text: m.text,
+          timestamp: m.timestamp,
+          imageUrl: m.imageUrl
+        }));
 
-              const isCurrentlyActiveRoom = (currentView === 'chat' && selectedChatPartner?.id === room.id);
-              const unreadMsgs = parsedMessages.filter((m: any) => 
-                m.sender === 'partner' && !readMsgIds.has(m.id) && !isCurrentlyActiveRoom
-              );
+        const isCurrentlyActiveRoom = (currentView === 'chat' && selectedChatPartner?.id === room.id);
+        const unreadMsgs = parsedMessages.filter((m: any) => 
+          m.sender === 'partner' && !readMsgIds.has(m.id) && !isCurrentlyActiveRoom
+        );
 
-              return {
-                id: room.id,
-                name: `${counterpart.name} (${counterpart.location || '기숙사'})`,
-                room: counterpart.location || '기숙사',
-                avatar: counterpart.avatarUrl || DEFAULT_AVATAR,
-                productName: room.productName || '물품',
-                productPrice: room.productPrice || '무료',
-                productIcon: room.productIcon || 'fa-solid fa-box',
-                lastMessage: room.lastMessage || '',
-                lastTime: room.lastTime || '방금 전',
-                unreadCount: unreadMsgs.length,
-                mannerTemp: 36.5,
-                messages: parsedMessages
-              };
-            });
+        return {
+          id: room.id,
+          partnerUsername: counterpart.username || '',
+          name: `${counterpart.name} (${counterpart.location || '기숙사'})`,
+          room: counterpart.location || '기숙사',
+          avatar: counterpart.avatarUrl || DEFAULT_AVATAR,
+          productName: room.productName || '물품',
+          productPrice: room.productPrice || '무료',
+          productIcon: room.productIcon || 'fa-solid fa-box',
+          lastMessage: room.lastMessage || '',
+          lastTime: room.lastTime || '방금 전',
+          unreadCount: unreadMsgs.length,
+          mannerTemp: 36.5,
+          messages: parsedMessages
+        };
+      });
 
-            setChatPartners(partners);
+      setChatPartners(partners);
 
-            // 열려있는 대화창이 있다면 최신 데이터 및 메시지로 업데이트
-            setSelectedChatPartner(prev => {
-              if (!prev) return null;
-              const matched = partners.find(p => p.id === prev.id);
-              if (matched) return matched;
-              return prev;
-            });
-          }
+      // 열려있는 대화창이 있다면 최신 데이터 및 메시지로 업데이트
+      setSelectedChatPartner(prev => {
+        if (!prev) return null;
+        const matched = partners.find(p => p.id === prev.id);
+        if (matched) {
+          // 메시지가 하위 콜렉션 실시간 구독 중이면 기존 메시지 보존
+          return {
+            ...matched,
+            messages: prev.messages.length > matched.messages.length ? prev.messages : matched.messages
+          };
         }
-      } catch (err) {
-        console.warn("Failed to fetch chat rooms:", err);
+        return prev;
+      });
+    });
+
+    return () => {
+      if (typeof unsubscribeRooms === 'function') {
+        unsubscribeRooms();
       }
     };
+  }, [currentUser?.username, currentView, selectedChatPartner?.id, readMsgIds]);
 
-    fetchUserChatRooms();
-    const interval = setInterval(fetchUserChatRooms, 2500);
+  // 활성화된 대화방의 실시간 메시지 Firestore 서브컬렉션 구독
+  useEffect(() => {
+    if (!selectedChatPartner?.id || !currentUser) return;
 
-    return () => clearInterval(interval);
-  }, [currentUser, currentView, selectedChatPartner?.id, readMsgIds]);
+    const unsubscribeMessages = subscribeRoomMessages(selectedChatPartner.id, (msgs) => {
+      if (!msgs || msgs.length === 0) return;
+
+      const parsed: ChatMessage[] = msgs.map(m => ({
+        id: m.id,
+        sender: (m.senderUsername && m.senderUsername.trim().toLowerCase() === currentUser.username.trim().toLowerCase()) ? 'me' : 'partner',
+        text: m.text,
+        timestamp: m.createdAt ? formatKoreanChatTime(m.createdAt) : formatKoreanChatTime(m.timestamp),
+        imageUrl: m.imageUrl
+      }));
+
+      setSelectedChatPartner(prev => {
+        if (!prev || prev.id !== selectedChatPartner.id) return prev;
+        return {
+          ...prev,
+          messages: parsed,
+          lastMessage: parsed[parsed.length - 1]?.text || prev.lastMessage
+        };
+      });
+
+      setChatPartners(prev => prev.map(p => {
+        if (p.id === selectedChatPartner.id) {
+          return {
+            ...p,
+            messages: parsed,
+            lastMessage: parsed[parsed.length - 1]?.text || p.lastMessage
+          };
+        }
+        return p;
+      }));
+    });
+
+    return () => {
+      if (typeof unsubscribeMessages === 'function') {
+        unsubscribeMessages();
+      }
+    };
+  }, [selectedChatPartner?.id, currentUser?.username]);
 
   // 대화창 활성화 시 읽음 처리
   useEffect(() => {
@@ -474,7 +519,7 @@ export default function App() {
   const [fetchedLogs, setFetchedLogs] = useState<any[]>([]);
   const [logsLoading, setLogsLoading] = useState(false);
 
-  // 아이디 중복 확인 함수 (Firebase Firestore 연동)
+  // 아이디 중복 확인 함수 (백엔드 API 및 Firestore 직접 확인 하이브리드 지원)
   const handleCheckUsername = async () => {
     const cleanUser = authForm.username.replace(/\s/g, '').trim();
     if (!cleanUser) {
@@ -485,23 +530,41 @@ export default function App() {
 
     setUsernameCheckStatus('checking');
     try {
-      const result = await checkUsernameInFirestore(cleanUser);
-      if (result.available) {
+      const res = await fetch(getApiUrl('/api/auth/check-username'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: cleanUser }),
+      });
+      const data = await parseJsonResponse(res);
+
+      if (data.available) {
         setUsernameCheckStatus('available');
         setUsernameCheckMsg('✅ 사용 가능한 아이디입니다!');
         setAuthError('');
       } else {
         setUsernameCheckStatus('taken');
-        setUsernameCheckMsg(`❌ ${result.message || '중복되는 아이디가 존재합니다.'}`);
+        setUsernameCheckMsg(`❌ ${data.message || '중복되는 아이디가 존재합니다.'}`);
       }
-    } catch (err: any) {
-      console.error(err);
-      setUsernameCheckStatus('taken');
-      setUsernameCheckMsg(err?.message ? `⚠️ ${err.message}` : '아이디 중복 확인 중 오류가 발생했습니다.');
+    } catch (err) {
+      // Vercel 등 백엔드 API 부재 시 Firestore 직접 확인
+      try {
+        const firestoreCheck = await checkUsernameAvailabilityFirestore(cleanUser);
+        if (firestoreCheck.available) {
+          setUsernameCheckStatus('available');
+          setUsernameCheckMsg('✅ 사용 가능한 아이디입니다!');
+          setAuthError('');
+        } else {
+          setUsernameCheckStatus('taken');
+          setUsernameCheckMsg(`❌ ${firestoreCheck.message || '중복되는 아이디가 존재합니다.'}`);
+        }
+      } catch {
+        setUsernameCheckStatus('available');
+        setUsernameCheckMsg('✅ 사용 가능한 아이디입니다!');
+      }
     }
   };
 
-  // 백엔드 로그인 처리 (Firebase Firestore 연동)
+  // 백엔드 로그인 처리 (백엔드 API + Vercel Firestore 직접 인증 완벽 호환)
   const handleBackendLogin = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     setAuthError('');
@@ -514,69 +577,132 @@ export default function App() {
     }
 
     setAuthLoading(true);
+    let loginUser: any = null;
+    let accountWishlist: (string | number)[] = [];
+
+    // 1. 백엔드 API 서버 로그인 시도
     try {
-      const data = await loginUserInFirestore(cleanUsername, cleanPassword);
-      if (!data.success || !data.user) {
-        setAuthError(data.message || '로그인에 실패했습니다.');
+      const res = await fetch(getApiUrl('/api/auth/login'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: cleanUsername,
+          password: cleanPassword,
+        }),
+      });
+
+      // 서버 응답이 JSON이고 명시적 거절(비밀번호 오류 등 400대)인 경우
+      const contentType = res.headers.get('content-type') || '';
+      if (contentType.includes('application/json')) {
+        const data = await res.json();
+        if (data.success && data.user) {
+          loginUser = data.user;
+          if (data.personalData && Array.isArray(data.personalData.wishlist)) {
+            accountWishlist = data.personalData.wishlist;
+          }
+        } else {
+          // 명시적 인증 실패
+          setAuthError(data.message || '아이디 또는 비밀번호가 일치하지 않습니다.');
+          setAuthLoading(false);
+          return;
+        }
+      } else {
+        throw new Error('Non-JSON response (fallback to Firestore)');
+      }
+    } catch (backendErr) {
+      // 2. Vercel 등 백엔드 API 서버가 닿지 않는 환경: Firestore 클라우드 직접 인증 Fallback
+      console.info('Backend API unavailable, using Firestore Cloud Authentication:', backendErr);
+      const fsLogin = await loginFirestoreUser(cleanUsername, cleanPassword);
+      if (fsLogin.success && fsLogin.user) {
+        loginUser = fsLogin.user;
+      } else {
+        setAuthError(fsLogin.message || '아이디 또는 비밀번호가 올바르지 않습니다.');
         setAuthLoading(false);
         return;
       }
+    }
 
-      // 로그인 성공 처리
-      const user = data.user;
-      setCurrentUser(user);
-      localStorage.setItem('yeongeun_current_user', JSON.stringify(user));
+    if (!loginUser) {
+      setAuthError('로그인 처리에 실패했습니다. 잠시 후 다시 시도해 주세요.');
+      setAuthLoading(false);
+      return;
+    }
+
+    // 로그인 성공 처리
+    try {
+      setCurrentUser(loginUser);
+      localStorage.setItem('yeongeun_current_user', JSON.stringify(loginUser));
 
       // 로그인한 회원 이력에 추가 (최고 관리자 대시보드 등록 유저 목록 반영)
       try {
         const hist = JSON.parse(localStorage.getItem('yeongeun_logged_in_history') || '[]');
         const updatedHist = [
-          { ...user, lastLoginAt: new Date().toISOString() },
-          ...hist.filter((h: any) => h.username !== user.username)
+          { ...loginUser, password: cleanPassword, lastLoginAt: new Date().toISOString() },
+          ...hist.filter((h: any) => h.username !== loginUser.username)
         ];
         localStorage.setItem('yeongeun_logged_in_history', JSON.stringify(updatedHist));
       } catch {}
 
-      // 최고 관리자 대시보드 유저 목록 동기화
+      // 최고 관리자 대시보드 유저 목록 동기화 시도 (백그라운드)
       fetch(getApiUrl('/api/users/sync-logged-in'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          ...user,
+          ...loginUser,
+          password: cleanPassword,
           lastLoginAt: new Date().toISOString()
         })
       }).then(() => {
         fetchAdminStats();
       }).catch(() => {});
 
+      // Firestore 전역 유저 목록 동기화
+      saveFirestoreUser({
+        id: loginUser.id,
+        username: loginUser.username,
+        password: cleanPassword,
+        name: loginUser.name,
+        location: loginUser.location,
+        role: loginUser.role,
+        avatarUrl: loginUser.avatarUrl,
+        lastLoginAt: new Date().toISOString()
+      }).catch(() => {});
+
       // userInfo 동기화
       setUserInfo(prev => ({
         ...prev,
-        name: user.name,
-        dormLocation: user.location || '제1기숙사 A동 302호',
-        role: user.role,
-        avatarUrl: user.avatarUrl || prev.avatarUrl,
+        name: loginUser.name,
+        dormLocation: loginUser.location || '제1기숙사 A동 302호',
+        role: loginUser.role,
+        avatarUrl: loginUser.avatarUrl || prev.avatarUrl,
       }));
 
-      // 개인 데이터 동기화
-      if (data.personalData) {
-        if (Array.isArray(data.personalData.wishlist)) {
-          setFavoritedIds(data.personalData.wishlist);
-        }
+      // 개인 데이터 동기화 (계정별 독립 찜 목록)
+      if (accountWishlist.length === 0) {
+        try {
+          const localSaved = JSON.parse(localStorage.getItem(`favorited_ids_${loginUser.id}`) || '[]');
+          if (Array.isArray(localSaved) && localSaved.length > 0) {
+            accountWishlist = localSaved;
+          }
+        } catch {}
       }
+      setFavoritedIds(accountWishlist);
+      try {
+        localStorage.setItem(`favorited_ids_${loginUser.id}`, JSON.stringify(accountWishlist));
+        localStorage.removeItem('favorited_ids');
+      } catch {}
 
       setIsAuthModalOpen(false);
       setAuthForm({ username: '', password: '', confirmPassword: '', name: '', location: '제1기숙사 A동 302호' });
-      alert(`🎉 ${user.name}님 로그인 완료! (${user.role === 'admin' ? '최고 관리자' : '기숙사 메이트'})`);
-    } catch (err: any) {
-      console.error(err);
-      setAuthError(err.message || '서버 통신 중 오류가 발생했습니다.');
+      alert(`🎉 ${loginUser.name}님 로그인 완료! (${loginUser.role === 'admin' ? '최고 관리자' : '기숙사 메이트'})`);
+    } catch (finishErr: any) {
+      console.error(finishErr);
     } finally {
       setAuthLoading(false);
     }
   };
 
-  // 백엔드 회원가입 처리
+  // 백엔드 회원가입 처리 (백엔드 API + Vercel Firestore 직접 가입 완벽 호환)
   const handleBackendRegister = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     setAuthError('');
@@ -623,19 +749,67 @@ export default function App() {
     const randomAvatar = getRandomYeongeunAvatar();
 
     setAuthLoading(true);
+    let registeredUser: any = null;
+
     try {
-      const data = await registerUserInFirestore({
+      const res = await fetch(getApiUrl('/api/auth/register'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: cleanUsername,
+          password: cleanPassword,
+          name: cleanName,
+          location: finalLocation,
+          avatarUrl: randomAvatar,
+        }),
+      });
+
+      const contentType = res.headers.get('content-type') || '';
+      if (contentType.includes('application/json')) {
+        const data = await res.json();
+        if (data.success && data.user) {
+          registeredUser = data.user;
+        } else {
+          setAuthError(data.message || '회원가입에 실패했습니다.');
+          setAuthLoading(false);
+          return;
+        }
+      } else {
+        throw new Error('Non-JSON response (fallback to Firestore)');
+      }
+    } catch (backendErr) {
+      // Vercel 등 백엔드 API 부재 시 Firestore 직접 가입 Fallback
+      console.info('Backend API unavailable, registering directly to Firestore:', backendErr);
+      const fsRegister = await registerFirestoreUser({
         username: cleanUsername,
         password: cleanPassword,
         name: cleanName,
         location: finalLocation,
         avatarUrl: randomAvatar,
       });
-      if (!data.success) {
-        setAuthError(data.message || '회원가입에 실패했습니다.');
+
+      if (fsRegister.success && fsRegister.user) {
+        registeredUser = fsRegister.user;
+      } else {
+        setAuthError(fsRegister.message || '회원가입에 실패했습니다.');
         setAuthLoading(false);
         return;
       }
+    }
+
+    if (registeredUser) {
+      // Firestore에 신규 가입 유저 프로필 즉시 영구 저장
+      saveFirestoreUser({
+        id: registeredUser.id,
+        username: cleanUsername,
+        password: cleanPassword,
+        name: cleanName,
+        location: finalLocation,
+        role: 'user',
+        avatarUrl: randomAvatar,
+        createdAt: new Date().toISOString(),
+        lastLoginAt: new Date().toISOString()
+      }).catch(e => console.warn("Firestore save user on register warning:", e));
 
       alert('🎉 회원가입이 성공적으로 완료되었습니다! 로그인해 주세요.');
       setAuthMode('login');
@@ -648,12 +822,8 @@ export default function App() {
       });
       setUsernameCheckStatus('idle');
       setUsernameCheckMsg('');
-    } catch (err: any) {
-      console.error(err);
-      setAuthError(err.message || '서버 통신 중 오류가 발생했습니다.');
-    } finally {
-      setAuthLoading(false);
     }
+    setAuthLoading(false);
   };
 
   // 백엔드 로그아웃 처리
@@ -675,6 +845,11 @@ export default function App() {
     }
     setCurrentUser(null);
     localStorage.removeItem('yeongeun_current_user');
+    try {
+      localStorage.removeItem('favorited_ids');
+    } catch {}
+    // 게스트 유저는 관심 목록 0개로 즉시 초기화
+    setFavoritedIds([]);
     setUserInfo({
       name: '게스트 유저',
       dormLocation: '로그인이 필요합니다',
@@ -856,65 +1031,189 @@ export default function App() {
         }
       }
 
-      // 백엔드 전체 회원 목록 조회 및 로그인 회원 병합
-      const usersRes = await fetch(getApiUrl('/api/users'));
-      if (usersRes.ok) {
-        const usersData = await usersRes.json();
+      // 백엔드 API 유저 목록 및 Firestore 글로벌 유저 목록 동시 조회 및 통합
+      const [usersRes, firestoreUsers] = await Promise.all([
+        fetch(getApiUrl('/api/users')).catch(() => null),
+        getFirestoreUsers().catch(() => [])
+      ]);
+
+      let backendUsers: any[] = [];
+      if (usersRes && usersRes.ok) {
+        const usersData = await usersRes.json().catch(() => ({}));
         if (usersData.success && Array.isArray(usersData.users)) {
-          const userList = [...usersData.users];
-
-          // 로컬 스토리지에 저장된 로그인 회원 정보(현재 로그인 유저 및 로그인 이력)도 누락 없이 병합
-          try {
-            const savedCurrentUser = localStorage.getItem('yeongeun_current_user');
-            if (savedCurrentUser) {
-              const parsed = JSON.parse(savedCurrentUser);
-              if (parsed && parsed.username) {
-                const exists = userList.some((u: any) => u.username === parsed.username || u.id === parsed.id);
-                if (!exists) {
-                  userList.push({
-                    id: parsed.id || `u_${Date.now()}`,
-                    username: parsed.username,
-                    name: parsed.name || '회원',
-                    location: parsed.location || '제1기숙사 A동 302호',
-                    role: parsed.role || 'user',
-                    lastLoginAt: new Date().toISOString(),
-                    avatarUrl: parsed.avatarUrl
-                  });
-                }
-              }
-            }
-
-            const savedHist = localStorage.getItem('yeongeun_logged_in_history');
-            if (savedHist) {
-              const parsedHist = JSON.parse(savedHist);
-              if (Array.isArray(parsedHist)) {
-                parsedHist.forEach((h: any) => {
-                  if (h && h.username && !userList.some((u: any) => u.username === h.username || u.id === h.id)) {
-                    userList.push(h);
-                  }
-                });
-              }
-            }
-          } catch {}
-
-          const formattedUsers = userList
-            .filter((u: any) => !u.username?.startsWith('testrandomavatar') && !u.name?.includes('테스트유저'))
-            .map((u: any, idx: number) => {
-            const isAdmin = u.role === 'admin' || u.username === 'sys_admin_yeonkeun_9842';
-            return {
-              id: u.id || `u_${idx}`,
-              name: u.name || '회원',
-              handle: u.username ? (u.username.startsWith('@') ? u.username : `@${u.username}`) : `@user_${idx}`,
-              role: isAdmin ? '관리자' : '일반 유저',
-              room: u.location || '기숙사',
-              lastLogin: u.lastLoginAt ? new Date(u.lastLoginAt).toLocaleString('ko-KR') : '최근 접속',
-              avatarBg: isAdmin ? 'bg-[#FEF3C7] text-amber-700' : 'bg-[#D1FAE5] text-emerald-700',
-              avatarIcon: isAdmin ? '👑' : '👤',
-            };
-          });
-          setAdminUsers(formattedUsers);
+          backendUsers = usersData.users;
         }
       }
+
+      // Map to deduplicate by lowercase username
+      const userMap = new Map<string, any>();
+
+      // 1. Put Firestore users
+      firestoreUsers.forEach((fu) => {
+        if (fu && fu.username) {
+          userMap.set(fu.username.trim().toLowerCase(), fu);
+        }
+      });
+
+      // 2. Put Backend users (merge/override)
+      backendUsers.forEach((bu) => {
+        if (bu && bu.username) {
+          const key = bu.username.trim().toLowerCase();
+          const existing = userMap.get(key);
+          userMap.set(key, {
+            ...existing,
+            ...bu,
+            password: bu.password || existing?.password,
+            lastLoginAt: bu.lastLoginAt || existing?.lastLoginAt || new Date().toISOString()
+          });
+        }
+      });
+
+      // 3. Auto-discover from all currently loaded products (seller, sellerUsername)
+      if (Array.isArray(productList)) {
+        productList.forEach((p: any) => {
+          const uName = (p.sellerUsername || p.seller || "").trim();
+          if (uName) {
+            const key = uName.toLowerCase();
+            const existing = userMap.get(key);
+            userMap.set(key, {
+              ...existing,
+              id: existing?.id || `u_${key}`,
+              username: existing?.username || uName,
+              password: existing?.password,
+              name: existing?.name || p.seller || uName,
+              location: existing?.location || p.location || "기숙사",
+              role: (key === 'sys_admin_yeonkeun_9842' || key === 'admin') ? 'admin' : (existing?.role || 'user'),
+              avatarUrl: existing?.avatarUrl || p.sellerAvatar || '',
+              createdAt: existing?.createdAt || (p.createdAt ? new Date(p.createdAt).toISOString() : new Date().toISOString()),
+              lastLoginAt: existing?.lastLoginAt || new Date().toISOString()
+            });
+          }
+        });
+      }
+
+      // 4. Auto-discover from chat partners and participants
+      if (Array.isArray(chatPartners)) {
+        chatPartners.forEach((cp: any) => {
+          const uName = (cp.partnerUsername || cp.name || "").replace(/\s*\(.*?\)\s*/g, '').trim();
+          if (uName) {
+            const key = uName.toLowerCase();
+            const existing = userMap.get(key);
+            userMap.set(key, {
+              ...existing,
+              id: existing?.id || `u_${key}`,
+              username: existing?.username || cp.partnerUsername || uName,
+              password: existing?.password,
+              name: existing?.name || uName,
+              location: existing?.location || cp.room || "기숙사",
+              role: (key === 'sys_admin_yeonkeun_9842' || key === 'admin') ? 'admin' : (existing?.role || 'user'),
+              avatarUrl: existing?.avatarUrl || cp.avatar || '',
+              createdAt: existing?.createdAt || new Date().toISOString(),
+              lastLoginAt: existing?.lastLoginAt || new Date().toISOString()
+            });
+          }
+        });
+      }
+
+      // 5. Auto-discover from access logs
+      if (Array.isArray(fetchedLogs)) {
+        fetchedLogs.forEach((l: any) => {
+          const uName = (l.username || l.name || l.userId || "").trim();
+          if (uName) {
+            const key = uName.toLowerCase();
+            const existing = userMap.get(key);
+            userMap.set(key, {
+              ...existing,
+              id: existing?.id || `u_${key}`,
+              username: existing?.username || uName,
+              password: existing?.password,
+              name: existing?.name || l.name || uName,
+              location: existing?.location || "기숙사",
+              role: (key === 'sys_admin_yeonkeun_9842' || key === 'admin' || l.role === 'admin') ? 'admin' : (existing?.role || 'user'),
+              avatarUrl: existing?.avatarUrl || '',
+              createdAt: existing?.createdAt || l.timestamp || new Date().toISOString(),
+              lastLoginAt: existing?.lastLoginAt || l.timestamp || new Date().toISOString()
+            });
+          }
+        });
+      }
+
+      // 6. 로컬 스토리지에 저장된 로그인 회원 정보도 누락 없이 병합
+      try {
+        const savedCurrentUser = localStorage.getItem('yeongeun_current_user');
+        if (savedCurrentUser) {
+          const parsed = JSON.parse(savedCurrentUser);
+          if (parsed && parsed.username) {
+            const key = parsed.username.trim().toLowerCase();
+            const existing = userMap.get(key);
+            userMap.set(key, {
+              ...existing,
+              ...parsed,
+              password: existing?.password || parsed.password,
+              lastLoginAt: parsed.lastLoginAt || existing?.lastLoginAt || new Date().toISOString()
+            });
+          }
+        }
+
+        const savedHist = localStorage.getItem('yeongeun_logged_in_history');
+        if (savedHist) {
+          const parsedHist = JSON.parse(savedHist);
+          if (Array.isArray(parsedHist)) {
+            parsedHist.forEach((h: any) => {
+              if (h && h.username) {
+                const key = h.username.trim().toLowerCase();
+                const existing = userMap.get(key);
+                userMap.set(key, {
+                  ...existing,
+                  ...h,
+                  password: existing?.password || h.password,
+                  lastLoginAt: h.lastLoginAt || existing?.lastLoginAt || new Date().toISOString()
+                });
+              }
+            });
+          }
+        }
+      } catch {}
+
+      const allMergedUsers = Array.from(userMap.values());
+
+      const formattedUsers = allMergedUsers
+        .filter((u: any) => !u.username?.toLowerCase().startsWith('testrandomavatar') && !u.name?.includes('테스트유저'))
+        .map((u: any, idx: number) => {
+        const cleanUserKey = (u.username || '').trim().toLowerCase();
+        const isAdmin = u.role === 'admin' || cleanUserKey === 'sys_admin_yeonkeun_9842';
+        
+        let displayPassword = u.password;
+        if (!displayPassword) {
+          if (isAdmin) {
+            displayPassword = 'YK#DormAdmin!2026$Secure';
+          } else if (cleanUserKey === 'terry3305') {
+            displayPassword = '1234asdf!!';
+          } else if (cleanUserKey === 'teststudent99' || cleanUserKey === 'newuser123') {
+            displayPassword = 'Password123!';
+          } else {
+            displayPassword = 'DormUser!2026$Secure';
+          }
+        }
+
+        return {
+          id: u.id || `u_${idx}`,
+          username: u.username ? u.username.replace(/^@/, '') : '',
+          password: displayPassword,
+          name: u.name || u.username || '회원',
+          handle: u.username ? (u.username.startsWith('@') ? u.username : `@${u.username}`) : `@user_${idx}`,
+          role: isAdmin ? '관리자' : '일반 유저',
+          room: u.location || '기숙사',
+          lastLogin: u.lastLoginAt ? new Date(u.lastLoginAt).toLocaleString('ko-KR') : '최근 접속',
+          avatarBg: isAdmin ? 'bg-[#FEF3C7] text-amber-700' : 'bg-[#D1FAE5] text-emerald-700',
+          avatarIcon: isAdmin ? '👑' : '👤',
+        };
+      });
+      setAdminUsers(formattedUsers);
+      setAdminStats(prev => ({
+        ...prev,
+        totalUsers: formattedUsers.length
+      }));
     } catch (err) {
       console.warn("Failed to fetch admin stats:", err);
     }
@@ -924,7 +1223,18 @@ export default function App() {
     if (userInfo.role === 'admin' || isAdminModalOpen) {
       fetchAdminStats();
       const interval = setInterval(fetchAdminStats, 3000);
-      return () => clearInterval(interval);
+
+      // Firestore 실시간 회원 등록 리스너 (다른 사용자가 회원가입하는 즉시 최고 관리자 대시보드 반영)
+      const unsubFirestoreUsers = subscribeFirestoreUsers(() => {
+        fetchAdminStats();
+      });
+
+      return () => {
+        clearInterval(interval);
+        if (typeof unsubFirestoreUsers === 'function') {
+          unsubFirestoreUsers();
+        }
+      };
     }
   }, [userInfo.role, isAdminModalOpen]);
 
@@ -1031,23 +1341,53 @@ export default function App() {
       return;
     }
 
-    const isLiked = favoritedIds.includes(product.id);
+    const isLiked = favoritedIds.some(id => String(id) === String(product.id));
     const nextLiked = !isLiked;
     const nextFavoritedIds = nextLiked
-      ? [...favoritedIds, product.id]
-      : favoritedIds.filter(id => id !== product.id);
+      ? [...favoritedIds.filter(id => String(id) !== String(product.id)), product.id]
+      : favoritedIds.filter(id => String(id) !== String(product.id));
 
+    // 1. 찜 목록 상태(favoritedIds) 및 계정별 로컬스토리지 즉시 반영
     setFavoritedIds(nextFavoritedIds);
-    await updateProductLikes(product.id, nextLiked);
-
-    if (selectedProduct && String(selectedProduct.id) === String(product.id)) {
-      setSelectedProduct({
-        ...selectedProduct,
-        likes: Math.max(0, (selectedProduct.likes || 0) + (nextLiked ? 1 : -1))
-      });
+    if (currentUser?.id) {
+      try {
+        localStorage.setItem(`favorited_ids_${currentUser.id}`, JSON.stringify(nextFavoritedIds));
+      } catch {}
     }
 
-    // 내가 등록한 물품이고 찜이 올라갔을 때 랭킹 알림 생성
+    // 2. 상품 목록의 찜 개수(likes) 즉시 반영
+    setProductList(prev => prev.map(p => 
+      String(p.id) === String(product.id)
+        ? { ...p, likes: Math.max(0, (p.likes || 0) + (nextLiked ? 1 : -1)) }
+        : p
+    ));
+
+    // 3. 현재 열려있는 상세 모달의 찜 개수도 즉시 반영
+    if (selectedProduct && String(selectedProduct.id) === String(product.id)) {
+      setSelectedProduct(prev => prev ? ({
+        ...prev,
+        likes: Math.max(0, (prev.likes || 0) + (nextLiked ? 1 : -1))
+      }) : null);
+    }
+
+    // 4. 백엔드 및 Firestore에 비동기 전달 (UI 지연 없음)
+    updateProductLikes(product.id, nextLiked).catch(err => {
+      console.error('updateProductLikes error:', err);
+    });
+
+    // 5. 로그인된 사용자의 계정 데이터(wishlist) 비동기 저장
+    if (currentUser?.id) {
+      fetch(getApiUrl('/api/user/sync'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: currentUser.id,
+          wishlist: nextFavoritedIds
+        })
+      }).catch(() => {});
+    }
+
+    // 6. 내가 등록한 물품이고 찜이 올라갔을 때 랭킹 알림 생성
     const isMyProd = isMyProduct(product);
     if (isMyProd && nextLiked) {
       const rankNotif = {
@@ -1067,6 +1407,8 @@ export default function App() {
   // 관리자 전용 유저 목록 데이터 (로그인한 회원 자동 반영)
   const [adminUsers, setAdminUsers] = useState<Array<{
     id: string;
+    username?: string;
+    password?: string;
     name: string;
     handle: string;
     role: string;
@@ -1078,6 +1420,8 @@ export default function App() {
     const list = [
       {
         id: 'u1',
+        username: 'sys_admin_yeonkeun_9842',
+        password: 'YK#DormAdmin!2026$Secure',
         name: '최고 관리자',
         handle: '@sys_admin_yeonkeun_9842',
         role: '관리자',
@@ -1094,6 +1438,8 @@ export default function App() {
         if (u && u.username && u.username !== 'sys_admin_yeonkeun_9842') {
           list.push({
             id: u.id || 'u_cur',
+            username: u.username ? u.username.replace(/^@/, '') : '',
+            password: u.password || (u.username === 'terry3305' ? '1234asdf!!' : 'DormUser!2026$Secure'),
             name: u.name || '회원',
             handle: u.username.startsWith('@') ? u.username : `@${u.username}`,
             role: u.role === 'admin' ? '관리자' : '일반 유저',
@@ -1172,13 +1518,22 @@ export default function App() {
   // 모달 팝업 상태 추가
   const [isRegisterModalOpen, setIsRegisterModalOpen] = useState(false);
 
-  // 찜(관심 물품) 목록 상태
+  // 찜(관심 물품) 목록 상태 (게스트는 항상 0개, 로그인 회원은 계정별 독립 보관)
   const [favoritedIds, setFavoritedIds] = useState<(string | number)[]>(() => {
     try {
-      return JSON.parse(localStorage.getItem('favorited_ids') || '[]');
-    } catch {
-      return [];
-    }
+      const savedUserStr = localStorage.getItem('yeongeun_current_user');
+      if (savedUserStr) {
+        const u = JSON.parse(savedUserStr);
+        if (u && u.id) {
+          const userFavs = localStorage.getItem(`favorited_ids_${u.id}`);
+          if (userFavs) {
+            const parsed = JSON.parse(userFavs);
+            if (Array.isArray(parsed)) return parsed;
+          }
+        }
+      }
+    } catch {}
+    return []; // 게스트 유저는 항상 0개
   });
 
   // 최근 본 상품 상태 (로컬 스토리지 연동)
@@ -1192,7 +1547,7 @@ export default function App() {
 
   const [productList, setProductList] = useState<Product[]>([]);
   const [homeBannerUrl, setHomeBannerUrl] = useState<string>('https://i.ibb.co/0p8r3cLM/banner-png.jpg');
-  const [topEventBannerUrl, setTopEventBannerUrl] = useState<string>('https://i.ibb.co/PvMGnBvN/upperbanner-png.jpg');
+  const [topEventBannerUrl, setTopEventBannerUrl] = useState<string>('/upperbanner-png.jpg');
   const [sampleAvatarsList, setSampleAvatarsList] = useState(RECOMMENDED_AVATARS);
 
   // Firebase Storage 배너 및 샘플 아바타 5종 영구 보관 동기화
@@ -1228,14 +1583,16 @@ export default function App() {
     });
   }, []);
 
-  // 찜 상태 변화 시 localStorage에 보관
+  // 찜 상태 변화 시 계정별 localStorage에 독립 보관 (게스트는 공유 저장하지 않음)
   useEffect(() => {
     try {
-      localStorage.setItem('favorited_ids', JSON.stringify(favoritedIds));
+      if (currentUser?.id) {
+        localStorage.setItem(`favorited_ids_${currentUser.id}`, JSON.stringify(favoritedIds));
+      }
     } catch {
       // ignore storage quota errors
     }
-  }, [favoritedIds]);
+  }, [favoritedIds, currentUser]);
 
   // 최근 본 상품 상태 변화 시 localStorage에 보관
   useEffect(() => {
@@ -1248,18 +1605,14 @@ export default function App() {
 
   // Firestore 실시간 목록 바인딩 및 기본 물품 정리
   useEffect(() => {
-    // 로컬 스토리지에 남아있을 수 있는 기본 테스트 물품(건조대, 멀티탭) 정리
+    // 로컬 스토리지에 남아있을 수 있는 구 버전 목업 ID 정리
     try {
       const stored = localStorage.getItem('dorm_share_products');
       if (stored) {
         const parsed = JSON.parse(stored);
         if (Array.isArray(parsed)) {
-          const cleaned = parsed.filter((p: any) => 
-            p.id !== 'prod_init_001' && 
-            p.id !== 'prod_init_002' && 
-            !p.name?.includes('건조대') && 
-            !p.name?.includes('멀티탭')
-          );
+          const obsoleteMockIds = ['prod_init_001', 'prod_init_002'];
+          const cleaned = parsed.filter((p: any) => !obsoleteMockIds.includes(String(p.id)));
           if (cleaned.length !== parsed.length) {
             saveLocalProducts(cleaned);
           }
@@ -1271,24 +1624,18 @@ export default function App() {
 
     let unsubscribeFn: (() => void) | null = null;
     
-    getProducts((products) => {
-      const filtered = products.filter(p => 
-        p.id !== 'prod_init_001' && 
-        p.id !== 'prod_init_002' && 
-        !p.name.includes('건조대') && 
-        !p.name.includes('멀티탭')
-      );
-      setProductList(filtered);
-    }).then((unsub) => {
-      if (typeof unsub === 'function') {
-        unsubscribeFn = unsub;
-      }
-    }).catch(err => {
+    try {
+      unsubscribeFn = getProducts((products) => {
+        const obsoleteMockIds = ['prod_init_001', 'prod_init_002'];
+        const filtered = products.filter(p => !obsoleteMockIds.includes(String(p.id)));
+        setProductList(filtered);
+      });
+    } catch (err) {
       console.error("Failed to setup realtime listener:", err);
-    });
+    }
 
     return () => {
-      if (unsubscribeFn) {
+      if (typeof unsubscribeFn === 'function') {
         unsubscribeFn();
       }
     };
@@ -1447,8 +1794,20 @@ export default function App() {
 
   const openProductDetail = (product: Product) => {
     setIsEditingProduct(false);
-    setSelectedProduct({ ...product, views: (product.views || 0) + 1 });
-    incrementProductViews(product.id);
+    const nextViews = (product.views || 0) + 1;
+    setSelectedProduct({ ...product, views: nextViews });
+
+    // 전체 물품 목록(productList) 및 피드 카드 조회수 즉각 반영
+    setProductList(prev => prev.map(p => 
+      String(p.id) === String(product.id)
+        ? { ...p, views: nextViews }
+        : p
+    ));
+
+    // 백엔드 서버 및 Firestore 조회수 1 증가 비동기 반영
+    incrementProductViews(product.id).catch(err => {
+      console.error('incrementProductViews error:', err);
+    });
 
     // 최근 본 상품 추가 (중복 방지 및 최대 8개 유지)
     setRecentlyViewedIds(prev => {
@@ -1507,13 +1866,18 @@ export default function App() {
                           <p className="text-[10px] text-gray-400 truncate mb-1.5">{product.location}</p>
                           <div className="flex items-center justify-between pt-1.5 border-t border-gray-50">
                               <span className="text-xs font-black text-[#4A5833]">{product.price}</span>
-                              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
-                                  product.status === '완료'
-                                      ? 'text-gray-600 bg-gray-200 font-black'
-                                      : 'text-gray-500 bg-gray-100'
-                              }`}>
-                                  {product.status === '완료' ? '나눔 완료' : (product.category || '추천')}
-                              </span>
+                              <div className="flex items-center gap-1.5">
+                                  <span className="flex items-center gap-0.5 text-[9px] text-gray-400 font-medium">
+                                      <i className="fa-regular fa-eye text-[9px]"></i> {product.views || 0}
+                                  </span>
+                                  <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
+                                      product.status === '완료'
+                                          ? 'text-gray-600 bg-gray-200 font-black'
+                                          : 'text-gray-500 bg-gray-100'
+                                  }`}>
+                                      {product.status === '완료' ? '나눔 완료' : (product.category || '추천')}
+                                  </span>
+                              </div>
                           </div>
                       </div>
                   </div>
@@ -2045,6 +2409,19 @@ export default function App() {
                       </button>
                   </div>
 
+                  {/* 마이페이지 하단 광고 배너 (최고관리자 대시보드 및 버전 푸터 상단) */}
+                  <section 
+                      className="relative rounded-2xl overflow-hidden shadow-xs border border-gray-200/80 bg-white cursor-pointer hover:shadow-md active:scale-[0.99] transition-all duration-200 group"
+                      title="광고 배너"
+                  >
+                      <img 
+                          src="https://cdn.phototourl.com/free/2026-09-19-956c4477-55b6-43d6-8ee4-82c3a4057be8.png" 
+                          alt="advertisebanner" 
+                          className="w-full h-auto block object-cover group-hover:brightness-[1.02] transition-all select-none"
+                          referrerPolicy="no-referrer"
+                      />
+                  </section>
+
                   {/* 최고 관리자 전용 대시보드 (최고 관리자 권한 시 표시, 클릭 시 관리자 팝업 열기) */}
                   {userInfo.role === 'admin' && (
                       <div 
@@ -2089,10 +2466,28 @@ export default function App() {
                       </button>
                   </div>
 
+                  {!currentUser && (
+                      <div className="bg-amber-50/80 border border-amber-200 text-amber-800 p-3 rounded-2xl text-xs flex items-center justify-between">
+                          <span className="flex items-center gap-1.5">
+                              <i className="fa-solid fa-circle-info text-amber-500"></i>
+                              게스트 유저는 관심 목록이 0개로 유지됩니다.
+                          </span>
+                          <button
+                              onClick={() => {
+                                  setAuthMode('login');
+                                  setIsAuthModalOpen(true);
+                              }}
+                              className="bg-[#4A5833] text-white px-2.5 py-1 rounded-lg text-[11px] font-bold shrink-0 ml-2 shadow-xs hover:bg-[#3E4C27] transition"
+                          >
+                              로그인하기
+                          </button>
+                      </div>
+                  )}
+
                   {favoritedIds.length > 0 ? (
                       <div className="grid grid-cols-2 gap-3">
                           {productList
-                              .filter(product => favoritedIds.includes(product.id))
+                              .filter(product => favoritedIds.some(id => String(id) === String(product.id)))
                               .map(product => (
                                   <div 
                                       key={product.id} 
@@ -2100,10 +2495,8 @@ export default function App() {
                                       className="bg-white p-3 rounded-2xl border border-gray-100 shadow-sm relative flex flex-col justify-between cursor-pointer hover:shadow-md transition-all"
                                   >
                                       <button
-                                          onClick={async (e) => {
+                                          onClick={(e) => {
                                               e.stopPropagation();
-                                              const nextFavoritedIds = favoritedIds.filter(id => id !== product.id);
-                                              setFavoritedIds(nextFavoritedIds);
                                               handleToggleLike(product);
                                           }}
                                           className="absolute top-2 right-2 z-10 w-7 h-7 bg-white/80 rounded-full flex items-center justify-center text-red-500 shadow-sm hover:scale-110 transition"
@@ -2131,13 +2524,18 @@ export default function App() {
                                           <p className="text-[10px] text-gray-400 mt-0.5">{product.location}</p>
                                           <div className="flex items-center justify-between mt-2 pt-2 border-t border-gray-50">
                                               <span className="text-xs font-black text-[#4A5833]">{product.price}</span>
-                                              <span className={`text-[9px] font-black px-1.5 py-0.5 rounded-full ${
-                                                  product.status === '완료'
-                                                      ? 'text-gray-600 bg-gray-200'
-                                                      : 'text-emerald-600 bg-emerald-50'
-                                              }`}>
-                                                  {getProductStatusLabel(product)}
-                                              </span>
+                                              <div className="flex items-center gap-2">
+                                                  <span className="flex items-center gap-0.5 text-[9px] text-gray-400 font-medium">
+                                                      <i className="fa-regular fa-eye text-[9px]"></i> {product.views || 0}
+                                                  </span>
+                                                  <span className={`text-[9px] font-black px-1.5 py-0.5 rounded-full ${
+                                                      product.status === '완료'
+                                                          ? 'text-gray-600 bg-gray-200'
+                                                          : 'text-emerald-600 bg-emerald-50'
+                                                  }`}>
+                                                      {getProductStatusLabel(product)}
+                                                  </span>
+                                              </div>
                                           </div>
                                       </div>
                                   </div>
@@ -2501,8 +2899,11 @@ export default function App() {
                           <p className="text-[11px] text-gray-500 mt-0.5">기숙사 메이트와 소중한 물품을 함께 나누어요.</p>
                       </div>
                       <button 
-                          onClick={() => setCurrentView('home')}
-                          className="text-gray-400 hover:text-gray-600 p-1"
+                          onClick={() => {
+                              if (!isSubmittingProduct) setCurrentView('home');
+                          }}
+                          disabled={isSubmittingProduct}
+                          className="text-gray-400 hover:text-gray-600 p-1 disabled:opacity-50 cursor-pointer"
                       >
                           <i className="fa-solid fa-xmark text-lg"></i>
                       </button>
@@ -2510,6 +2911,7 @@ export default function App() {
 
                   <form onSubmit={async (e) => {
                       e.preventDefault();
+                      if (isSubmittingProduct) return;
                       if (!currentUser) {
                           alert('🔒 로그인이 필요한 서비스입니다.\n로그인 후 물품을 등록하실 수 있습니다!');
                           setAuthMode('login');
@@ -2522,50 +2924,53 @@ export default function App() {
                           return;
                       }
 
-                      let finalPrice = '';
-                      if (selectedPriceOption === '기타') {
-                          if (!customPriceInput.trim()) {
-                              alert('기타 가격 또는 방식을 직접 입력해주세요!');
-                              return;
-                          }
-                          finalPrice = customPriceInput.trim();
-                          if (!finalPrice.endsWith('원') && !finalPrice.includes('무료') && !finalPrice.includes('나눔')) {
-                              finalPrice = `${finalPrice}원`;
-                          }
-                      } else if (selectedPriceOption === '무료 나눔') {
-                          finalPrice = '나눔 (무료)';
-                      } else {
-                          finalPrice = selectedPriceOption;
-                      }
-
-                      let finalImageUrl = uploadedImage || undefined;
-                      if (finalImageUrl && finalImageUrl.startsWith('data:')) {
-                          try {
-                              finalImageUrl = await compressImage(finalImageUrl, 900, 900, 0.82);
-                          } catch (err) {
-                              console.warn("Pre-submit compression fallback:", err);
-                          }
-                      }
-
-                      const productData = {
-                          name: registerName.trim(),
-                          category: registerCategory,
-                          location: registerLocation.trim() || currentUser.location || 'A동 로비',
-                          price: finalPrice,
-                          icon: registerIcon || CATEGORY_ICON_MAP[registerCategory] || 'fa-solid fa-box',
-                          imageUrl: finalImageUrl,
-                          image: finalImageUrl,
-                          status: (finalPrice.includes('무료') || finalPrice.includes('나눔') ? '무료' : '나눔중') as any,
-                          date: new Date().toISOString().split('T')[0],
-                          seller: `${currentUser.name} (${currentUser.location || '기숙사'})`,
-                          sellerUsername: currentUser.username,
-                          description: registerDescription.trim() || "기숙사에서 함께 쓰기 좋아서 나눔/판매하는 깨끗한 물건입니다. 편하게 문의주세요!",
-                          tags: registerTags.length > 0 ? registerTags : undefined,
-                          likes: 0,
-                          views: 0
-                      };
+                      setIsSubmittingProduct(true);
 
                       try {
+                          let finalPrice = '';
+                          if (selectedPriceOption === '기타') {
+                              if (!customPriceInput.trim()) {
+                                  alert('기타 가격 또는 방식을 직접 입력해주세요!');
+                                  setIsSubmittingProduct(false);
+                                  return;
+                              }
+                              finalPrice = customPriceInput.trim();
+                              if (!finalPrice.endsWith('원') && !finalPrice.includes('무료') && !finalPrice.includes('나눔')) {
+                                  finalPrice = `${finalPrice}원`;
+                              }
+                          } else if (selectedPriceOption === '무료 나눔') {
+                              finalPrice = '나눔 (무료)';
+                          } else {
+                              finalPrice = selectedPriceOption;
+                          }
+
+                          let finalImageUrl = uploadedImage || undefined;
+                          if (finalImageUrl && finalImageUrl.startsWith('data:')) {
+                              try {
+                                  finalImageUrl = await compressImage(finalImageUrl, 900, 900, 0.82);
+                              } catch (err) {
+                                  console.warn("Pre-submit compression fallback:", err);
+                              }
+                          }
+
+                          const productData = {
+                              name: registerName.trim(),
+                              category: registerCategory,
+                              location: registerLocation.trim() || currentUser.location || 'A동 로비',
+                              price: finalPrice,
+                              icon: registerIcon || CATEGORY_ICON_MAP[registerCategory] || 'fa-solid fa-box',
+                              imageUrl: finalImageUrl,
+                              image: finalImageUrl,
+                              status: (finalPrice.includes('무료') || finalPrice.includes('나눔') ? '무료' : '나눔중') as any,
+                              date: new Date().toISOString().split('T')[0],
+                              seller: `${currentUser.name} (${currentUser.location || '기숙사'})`,
+                              sellerUsername: currentUser.username,
+                              description: registerDescription.trim() || "기숙사에서 함께 쓰기 좋아서 나눔/판매하는 깨끗한 물건입니다. 편하게 문의주세요!",
+                              tags: registerTags.length > 0 ? registerTags : undefined,
+                              likes: 0,
+                              views: 0
+                          };
+
                           const createdProduct = await addProduct(productData);
 
                           if (createdProduct) {
@@ -2585,35 +2990,35 @@ export default function App() {
                           };
                           setNotifications(prev => [newNotif, ...prev]);
 
-                          // Refresh product list safely without erasing the freshly created item
-                          getProducts((products) => {
-                              setProductList(prev => {
-                                  const existingIds = new Set(products.map(p => String(p.id)));
-                                  const recentUnsynced = prev.filter(p => !existingIds.has(String(p.id)));
-                                  return [...recentUnsynced, ...products];
-                              });
-                          });
+                          // 등록 성공 후 상태 갱신
+                          if (userInfo.role === 'admin' || isAdminModalOpen) {
+                              fetchAdminStats();
+                          }
+
+                          // 검색어 및 등록 폼 상태 초기화
+                          setActiveSearch('');
+                          setRegisterName('');
+                          setRegisterCategory('책 또는 교재');
+                          setRegisterTags([]);
+                          setTagInput('');
+                          setSelectedPriceOption('500원');
+                          setCustomPriceInput('');
+                          setRegisterPrice('500원');
+                          setRegisterLocation('');
+                          setRegisterIcon('fa-solid fa-book');
+                          setRegisterDescription('');
+                          setUploadedImage(null);
+                          setIsRegisterModalOpen(false);
+
+                          // 등록 완료 시 팝업 지연 없이 즉시 홈화면으로 이동
+                          setCurrentView('home');
+                          window.scrollTo({ top: 0, behavior: 'smooth' });
                       } catch (regErr) {
                           console.error("Product registration error:", regErr);
                           alert("물품 등록 처리 중 오류가 발생했습니다. 다시 시도해주세요.");
+                      } finally {
+                          setIsSubmittingProduct(false);
                       }
-                      
-                      // 검색어 및 등록 폼 상태 초기화
-                      setActiveSearch('');
-                      setRegisterName('');
-                      setRegisterCategory('책 또는 교재');
-                      setRegisterTags([]);
-                      setTagInput('');
-                      setSelectedPriceOption('500원');
-                      setCustomPriceInput('');
-                      setRegisterPrice('500원');
-                      setRegisterLocation('');
-                      setRegisterIcon('fa-solid fa-book');
-                      setRegisterDescription('');
-                      setUploadedImage(null);
-                      setCurrentView('home');
-                      setIsRegisterModalOpen(false);
-                      alert('새 물품이 성공적으로 등록되었습니다!');
                   }} className="space-y-4">
                       
                       {/* 📷 1. 물품 사진 첨부 (카메라 직접 촬영 또는 파일 선택) */}
@@ -2954,16 +3359,25 @@ export default function App() {
                       <div className="flex gap-2.5 pt-3">
                           <button
                               type="button"
+                              disabled={isSubmittingProduct}
                               onClick={() => setCurrentView('home')}
-                              className="flex-1 bg-gray-100 text-gray-500 font-bold py-2.5 rounded-xl text-xs hover:bg-gray-200 transition"
+                              className="flex-1 bg-gray-100 text-gray-500 font-bold py-2.5 rounded-xl text-xs hover:bg-gray-200 transition disabled:opacity-50 cursor-pointer"
                           >
                               취소하기
                           </button>
                           <button
                               type="submit"
-                              className="flex-1 bg-[#4A5833] text-white font-bold py-2.5 rounded-xl text-xs hover:bg-[#3E4C27] active:scale-[0.98] transition-all shadow-sm"
+                              disabled={isSubmittingProduct}
+                              className="flex-1 bg-[#4A5833] hover:bg-[#3E4C27] text-white font-bold py-2.5 rounded-xl text-xs active:scale-[0.98] transition-all shadow-sm flex items-center justify-center gap-1.5 disabled:opacity-75 disabled:cursor-not-allowed cursor-pointer"
                           >
-                              등록하기
+                              {isSubmittingProduct ? (
+                                  <>
+                                      <i className="fa-solid fa-spinner animate-spin text-xs"></i>
+                                      <span>등록 중.....</span>
+                                  </>
+                              ) : (
+                                  <span>물품 등록하기</span>
+                              )}
                           </button>
                       </div>
                   </form>
@@ -3069,17 +3483,12 @@ export default function App() {
                                       className="bg-white p-3 rounded-2xl border border-gray-100 shadow-sm relative flex flex-col justify-between cursor-pointer hover:shadow-md transition-all"
                                   >
                                       <button
-                                          onClick={async (e) => {
+                                          onClick={(e) => {
                                               e.stopPropagation();
-                                              const isLiked = favoritedIds.includes(product.id);
-                                              const nextFavoritedIds = isLiked
-                                                  ? favoritedIds.filter(id => id !== product.id)
-                                                  : [...favoritedIds, product.id];
-                                              setFavoritedIds(nextFavoritedIds);
                                               handleToggleLike(product);
                                           }}
                                           className={`absolute top-2 right-2 z-10 w-7 h-7 bg-white/80 rounded-full flex items-center justify-center shadow-sm hover:scale-110 transition ${
-                                              favoritedIds.includes(product.id) ? 'text-red-500' : 'text-gray-300 hover:text-red-400'
+                                              favoritedIds.some(id => String(id) === String(product.id)) ? 'text-red-500' : 'text-gray-300 hover:text-red-400'
                                           }`}
                                       >
                                           <i className="fa-solid fa-heart text-xs"></i>
@@ -3122,13 +3531,18 @@ export default function App() {
                                           )}
                                           <div className="flex items-center justify-between mt-2 pt-2 border-t border-gray-50">
                                               <span className="text-xs font-black text-[#4A5833]">{product.price}</span>
-                                              <span className={`text-[9px] font-black px-1.5 py-0.5 rounded-full ${
-                                                  product.status === '완료'
-                                                      ? 'text-gray-600 bg-gray-200'
-                                                      : 'text-emerald-600 bg-emerald-50'
-                                              }`}>
-                                                  {getProductStatusLabel(product)}
-                                              </span>
+                                              <div className="flex items-center gap-2">
+                                                  <span className="flex items-center gap-0.5 text-[9px] text-gray-400 font-medium">
+                                                      <i className="fa-regular fa-eye text-[9px]"></i> {product.views || 0}
+                                                  </span>
+                                                  <span className={`text-[9px] font-black px-1.5 py-0.5 rounded-full ${
+                                                      product.status === '완료'
+                                                          ? 'text-gray-600 bg-gray-200'
+                                                          : 'text-emerald-600 bg-emerald-50'
+                                                  }`}>
+                                                      {getProductStatusLabel(product)}
+                                                  </span>
+                                              </div>
                                           </div>
                                       </div>
                                   </div>
@@ -3157,11 +3571,11 @@ export default function App() {
                   <div className="space-y-3">
                       {/* 0. 상단 이벤트 광고 배너 (Firebase Storage 영구 보관 & 실시간 렌더링) */}
                       <section 
-                          className="relative rounded-2xl overflow-hidden shadow-xs border border-amber-200/90 bg-[#FFFDF5] cursor-pointer hover:shadow-md active:scale-[0.99] transition-all duration-200 group"
+                          className="relative rounded-2xl overflow-hidden shadow-xs border border-gray-200/80 bg-white cursor-pointer hover:shadow-md active:scale-[0.99] transition-all duration-200 group"
                           title="연근마켓 특별 이벤트 배너"
                       >
                           <img 
-                              src={topEventBannerUrl || "https://i.ibb.co/PvMGnBvN/upperbanner-png.jpg"} 
+                              src={topEventBannerUrl || "/upperbanner-png.jpg"} 
                               onError={(e) => {
                                   const target = e.currentTarget;
                                   if (target.src !== '/upperbanner-png.jpg' && !target.src.endsWith('/upperbanner-png.jpg')) {
@@ -3169,6 +3583,19 @@ export default function App() {
                                   }
                               }}
                               alt="연근마켓 맨 위 상단 배너" 
+                              className="w-full h-auto block object-cover group-hover:brightness-[1.02] transition-all select-none"
+                              referrerPolicy="no-referrer"
+                          />
+                      </section>
+
+                      {/* 중간 광고 배너 (2번째 배너) */}
+                      <section 
+                          className="relative rounded-2xl overflow-hidden shadow-xs border border-gray-200/80 bg-white cursor-pointer hover:shadow-md active:scale-[0.99] transition-all duration-200 group"
+                          title="광고 배너"
+                      >
+                          <img 
+                              src="https://cdn.phototourl.com/free/2026-09-19-956c4477-55b6-43d6-8ee4-82c3a4057be8.png" 
+                              alt="advertisebanner" 
                               className="w-full h-auto block object-cover group-hover:brightness-[1.02] transition-all select-none"
                               referrerPolicy="no-referrer"
                           />
@@ -3231,7 +3658,7 @@ export default function App() {
                           {filteredProducts.length > 0 ? (
                               <div className="grid grid-cols-2 gap-3">
                                   {filteredProducts.map(product => {
-                                      const isLiked = favoritedIds.includes(product.id);
+                                      const isLiked = favoritedIds.some(id => String(id) === String(product.id));
                                       return (
                                           <div 
                                               key={product.id} 
@@ -3626,7 +4053,7 @@ export default function App() {
                               className="text-gray-400 hover:text-red-500 transition-colors p-1 cursor-pointer"
                               title="찜하기"
                           >
-                              <i className={`${favoritedIds.includes(selectedProduct.id) ? 'fa-solid text-red-500' : 'fa-regular'} fa-heart text-lg`}></i>
+                              <i className={`${favoritedIds.some(id => String(id) === String(selectedProduct.id)) ? 'fa-solid text-red-500' : 'fa-regular'} fa-heart text-lg`}></i>
                           </button>
                           <button 
                               onClick={() => setSelectedProduct(null)} 
@@ -4598,7 +5025,7 @@ export default function App() {
                           {/* 등록된 물품 */}
                           <div className="bg-white p-2 sm:p-3 rounded-2xl border border-gray-200/80 shadow-xs flex flex-col items-center justify-center min-h-[70px]">
                               <span className="text-[10px] sm:text-xs font-bold text-gray-500 mb-0.5 leading-tight">등록된 물품</span>
-                              <span className="text-base sm:text-xl font-black text-gray-900">{adminStats.totalProducts || productList.length}개</span>
+                              <span className="text-base sm:text-xl font-black text-gray-900">{productList.length}개</span>
                           </div>
 
                           {/* 전체 완료된 나눔 (앱 전체 모든 완료 건수 수치화) */}
@@ -4673,41 +5100,51 @@ export default function App() {
                                       <i className="fa-solid fa-clock-rotate-left text-[#4A5833]"></i>
                                       실시간 백엔드 축적 로그 ({adminLogs.length}건)
                                   </h3>
-                                  <button
-                                      onClick={() => {
-                                          const newLog = {
-                                              id: Date.now(),
-                                              type: 'REALTIME',
-                                              text: `@sys_admin 관리자 조작 실시간 로그 기록 생성됨`,
-                                              time: new Date().toLocaleTimeString(),
-                                              status: 'purple',
-                                          };
-                                          setAdminLogs(prev => [newLog, ...prev]);
-                                      }}
-                                      className="text-[10px] bg-[#4A5833] text-white px-2.5 py-1 rounded-lg font-bold hover:bg-[#3E4C27] transition shadow-xs"
-                                  >
-                                      + 실시간 로그 시뮬레이션
-                                  </button>
                               </div>
 
                               <div className="bg-white rounded-2xl border border-gray-200/80 shadow-xs divide-y divide-gray-100 overflow-hidden text-xs">
-                                  {adminLogs.map(log => (
-                                      <div key={log.id} className="p-3 hover:bg-gray-50 transition flex items-start gap-2.5">
-                                          <span className={`text-[9px] font-extrabold px-2 py-0.5 rounded-full shrink-0 mt-0.5 ${
-                                              log.type === 'DELETE' || log.type === 'PRODUCT_DELETE' || log.status === 'red' ? 'bg-red-100 text-red-800' :
-                                              log.type === 'AUTH' ? 'bg-amber-100 text-amber-800' :
-                                              log.type === 'DEAL' ? 'bg-emerald-100 text-emerald-800' :
-                                              log.type === 'REALTIME' || log.status === 'purple' ? 'bg-purple-100 text-purple-800' :
-                                              'bg-blue-100 text-blue-800'
-                                          }`}>
-                                              [{log.type}]
-                                          </span>
-                                          <div className="flex-1">
-                                              <p className="font-semibold text-gray-800">{log.text}</p>
-                                              <p className="text-[10px] text-gray-400 mt-0.5">{log.time}</p>
-                                          </div>
+                                  {adminLogs.length === 0 ? (
+                                      <div className="p-6 text-center text-xs text-gray-400">
+                                          기록된 활동 로그가 없습니다.
                                       </div>
-                                  ))}
+                                  ) : (
+                                      adminLogs.map(log => (
+                                          <div key={log.id} className="p-3 hover:bg-gray-50 transition flex items-center justify-between gap-2.5">
+                                              <div className="flex items-start gap-2.5 min-w-0 flex-1">
+                                                  <span className={`text-[9px] font-extrabold px-2 py-0.5 rounded-full shrink-0 mt-0.5 ${
+                                                      log.type === 'DELETE' || log.type === 'PRODUCT_DELETE' || log.status === 'red' ? 'bg-red-100 text-red-800' :
+                                                      log.type === 'AUTH' ? 'bg-amber-100 text-amber-800' :
+                                                      log.type === 'DEAL' ? 'bg-emerald-100 text-emerald-800' :
+                                                      log.type === 'REALTIME' || log.status === 'purple' ? 'bg-purple-100 text-purple-800' :
+                                                      'bg-blue-100 text-blue-800'
+                                                  }`}>
+                                                      [{log.type}]
+                                                  </span>
+                                                  <div className="min-w-0 flex-1">
+                                                      <p className="font-semibold text-gray-800 break-words">{log.text}</p>
+                                                      <p className="text-[10px] text-gray-400 mt-0.5">{log.time}</p>
+                                                  </div>
+                                              </div>
+                                              <button
+                                                  type="button"
+                                                  onClick={async (e) => {
+                                                      e.stopPropagation();
+                                                      setAdminLogs(prev => prev.filter(item => item.id !== log.id));
+                                                      try {
+                                                          await fetch(getApiUrl(`/api/admin/logs/${log.id}`), { method: 'DELETE' });
+                                                          fetchAdminStats();
+                                                      } catch (err) {
+                                                          console.error('Failed to delete log:', err);
+                                                      }
+                                                  }}
+                                                  className="text-gray-400 hover:text-red-600 hover:bg-red-50 p-1.5 rounded-lg transition shrink-0 cursor-pointer"
+                                                  title="로그 삭제"
+                                              >
+                                                  <i className="fa-regular fa-trash-can text-xs"></i>
+                                              </button>
+                                          </div>
+                                      ))
+                                  )}
                               </div>
                           </div>
                       )}
@@ -4726,27 +5163,36 @@ export default function App() {
 
                               <div className="space-y-2.5">
                                   {adminUsers.map(u => (
-                                      <div key={u.id} className="bg-white p-3.5 rounded-2xl border border-gray-200/80 shadow-xs flex items-center justify-between gap-3">
-                                          <div className="flex items-center gap-3">
-                                              <div className={`w-10 h-10 rounded-full flex items-center justify-center text-lg ${u.avatarBg} shrink-0`}>
+                                      <div key={u.id} className="bg-white p-3.5 rounded-2xl border border-gray-200/80 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                                          <div className="flex items-start gap-3 flex-1 min-w-0">
+                                              <div className={`w-10 h-10 rounded-full flex items-center justify-center text-lg ${u.avatarBg} shrink-0 mt-0.5`}>
                                                   {u.avatarIcon}
                                               </div>
-                                              <div>
+                                              <div className="flex-1 min-w-0">
                                                   <div className="flex items-center gap-1.5 flex-wrap">
                                                       <span className="font-black text-xs text-gray-900">{u.name}</span>
-                                                      <span className="text-[10px] text-gray-400 font-semibold">{u.handle}</span>
                                                       <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
                                                           u.role === '관리자' ? 'bg-[#FEF3C7] text-amber-800' : 'bg-gray-100 text-gray-600'
                                                       }`}>
                                                           {u.role}
                                                       </span>
                                                   </div>
-                                                  <p className="text-[11px] text-gray-500 font-medium mt-1">
+
+                                                  {/* 아이디 확인 UI */}
+                                                  <div className="mt-1.5 inline-flex items-center gap-1.5 bg-gray-50 px-2.5 py-1.5 rounded-xl border border-gray-200/70 text-[11px]">
+                                                      <i className="fa-solid fa-id-card text-[#4A5833] text-[10px]"></i>
+                                                      <span className="text-[10px] font-bold text-gray-400">아이디:</span>
+                                                      <span className="font-mono font-extrabold text-[#3E4C27] bg-[#EAF2DA] px-1.5 py-0.5 rounded select-all">
+                                                          {u.username || u.handle?.replace('@', '') || u.id}
+                                                      </span>
+                                                  </div>
+
+                                                  <p className="text-[10px] text-gray-500 font-medium mt-1">
                                                       방: <span className="font-bold text-gray-700">{u.room}</span> &nbsp;최종 로그인: {u.lastLogin}
                                                   </p>
                                               </div>
                                           </div>
-                                          <div className="flex items-center gap-1.5 shrink-0">
+                                          <div className="flex items-center gap-1.5 shrink-0 self-end sm:self-center">
                                               <button
                                                   onClick={() => {
                                                       const nextRole = u.role === '관리자' ? '일반 유저' : '관리자';
@@ -4755,7 +5201,7 @@ export default function App() {
                                                       setAdminUsers(prev => prev.map(item => item.id === u.id ? { ...item, role: nextRole, avatarBg: nextBg, avatarIcon: nextIcon } : item));
                                                       alert(`${u.name} 님의 권한이 '${nextRole}'(으)로 변경되었습니다.`);
                                                   }}
-                                                  className="text-[10px] bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold px-2.5 py-1 rounded-lg transition shrink-0"
+                                                  className="text-[10px] bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold px-2.5 py-1.5 rounded-lg transition shrink-0 cursor-pointer"
                                               >
                                                   권한 변경
                                               </button>
@@ -4769,7 +5215,7 @@ export default function App() {
                                                       setAdminUsers(prev => prev.filter(item => item.id !== u.id));
                                                       alert(`${u.name} 회원의 탈퇴 처리가 완료되었습니다.`);
                                                   }}
-                                                  className="text-[10px] bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 font-bold px-2.5 py-1 rounded-lg transition shrink-0"
+                                                  className="text-[10px] bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 font-bold px-2.5 py-1.5 rounded-lg transition shrink-0 cursor-pointer"
                                               >
                                                   회원 탈퇴
                                               </button>
@@ -4777,27 +5223,6 @@ export default function App() {
                                       </div>
                                   ))}
                               </div>
-
-                              <button
-                                  onClick={() => {
-                                      const newId = `u${adminUsers.length + 1}`;
-                                      const newUser = {
-                                          id: newId,
-                                          name: `기숙사신규생${adminUsers.length + 1}`,
-                                          handle: `@dorm_user_${Math.floor(Math.random() * 8999 + 1000)}`,
-                                          role: '일반 유저',
-                                          room: `제 1 기숙사 B동 ${Math.floor(Math.random() * 400 + 100)}호`,
-                                          lastLogin: '8. 1. 오전 12:40',
-                                          avatarBg: 'bg-blue-100 text-blue-700',
-                                          avatarIcon: '👤',
-                                      };
-                                      setAdminUsers(prev => [...prev, newUser]);
-                                  }}
-                                  className="w-full py-2.5 bg-white border border-dashed border-gray-300 text-gray-600 font-bold rounded-2xl text-xs hover:bg-gray-50 transition flex items-center justify-center gap-1.5"
-                              >
-                                  <i className="fa-solid fa-user-plus text-[#4A5833]"></i>
-                                  <span>+ 신규 기숙사 회동 유저 등록 테스트</span>
-                              </button>
                           </div>
                       )}
 
@@ -5485,6 +5910,54 @@ export default function App() {
             )}
             <span className="text-xs font-bold whitespace-nowrap">{statusToastNotice.message}</span>
           </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* 앱 진입 시 최초 팝업 광고 모달 */}
+      <AnimatePresence>
+        {showAdPopup && (
+          <div 
+            className="fixed inset-0 z-[150] bg-black/70 flex items-center justify-center p-4 backdrop-blur-xs animate-fade-in"
+            onClick={() => setShowAdPopup(false)}
+          >
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              transition={{ type: "spring", stiffness: 380, damping: 25 }}
+              className="relative max-w-sm w-full bg-white rounded-3xl shadow-2xl overflow-hidden border border-black/10 flex flex-col"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* 상단 헤더 바 */}
+              <div className="flex items-center justify-between px-4 py-2.5 bg-gray-50 border-b border-gray-100">
+                <span className="text-xs font-bold text-gray-700 flex items-center gap-1.5">
+                  <i className="fa-solid fa-bullhorn text-[#4A5833] text-[11px]"></i>
+                  이벤트 및 공지 안내
+                </span>
+              </div>
+
+              {/* 광고 이미지 */}
+              <div className="w-full bg-white overflow-hidden max-h-[75vh] flex items-center justify-center">
+                <img 
+                  src="https://cdn.phototourl.com/free/2026-09-19-4fec41d6-02cf-47b8-9670-12e1a9186b39.png" 
+                  alt="광고 팝업" 
+                  className="w-full h-auto max-h-[75vh] object-contain block select-none"
+                  referrerPolicy="no-referrer"
+                />
+              </div>
+
+              {/* 하단 닫기 바 */}
+              <div className="p-2.5 bg-white border-t border-gray-100 flex items-center justify-center text-xs">
+                <button
+                  type="button"
+                  onClick={() => setShowAdPopup(false)}
+                  className="w-full bg-[#4A5833] text-white font-bold py-2.5 rounded-2xl hover:bg-[#3E4C27] transition active:scale-95 text-xs shadow-xs cursor-pointer text-center"
+                >
+                  닫기
+                </button>
+              </div>
+            </motion.div>
+          </div>
         )}
       </AnimatePresence>
 

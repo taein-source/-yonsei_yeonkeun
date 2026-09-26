@@ -223,13 +223,8 @@ let userDataStore: Record<string, UserPersonalData> = loadJSON(USER_DATA_FILE, {
 const DEFAULT_PRODUCTS: ServerProduct[] = [];
 
 let productsStore: ServerProduct[] = loadJSON(PRODUCTS_FILE, DEFAULT_PRODUCTS);
-// Remove drying rack and multi-tap if present
-productsStore = productsStore.filter(p => 
-  p.id !== "prod_init_001" && 
-  p.id !== "prod_init_002" && 
-  !p.name.includes("건조대") && 
-  !p.name.includes("멀티탭")
-);
+const obsoleteMockIds = ["prod_init_001", "prod_init_002"];
+productsStore = productsStore.filter(p => !obsoleteMockIds.includes(String(p.id)));
 saveJSON(PRODUCTS_FILE, productsStore);
 
 let chatRoomsStore: ServerChatRoom[] = loadJSON(CHATS_FILE, []);
@@ -253,6 +248,31 @@ export function createApp() {
     res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization");
     if (req.method === "OPTIONS") {
       return res.sendStatus(200);
+    }
+    next();
+  });
+
+  // Support both /api/... and stripped endpoint URLs (e.g. from Vercel Serverless Function rewrites)
+  app.use((req, _res, next) => {
+    if (req.url && !req.url.startsWith("/api")) {
+      const apiPrefixes = [
+        "/upload",
+        "/health",
+        "/auth",
+        "/logs",
+        "/users",
+        "/user",
+        "/products",
+        "/chats",
+        "/admin",
+        "/analyze-image"
+      ];
+      const shouldPrefix = apiPrefixes.some(
+        (p) => req.url === p || req.url.startsWith(p + "/") || req.url.startsWith(p + "?")
+      );
+      if (shouldPrefix) {
+        req.url = "/api" + (req.url.startsWith("/") ? req.url : "/" + req.url);
+      }
     }
     next();
   });
@@ -572,14 +592,109 @@ export function createApp() {
     }
   });
 
-  // 6. 회원 목록 조회 (관리자 전용)
+  // Helper function: 전체 회원 자동 발굴 및 통합 (usersStore + productsStore + chatRoomsStore + accessLogsStore)
+  function getAllDiscoveredUsers(): UserAccount[] {
+    const map = new Map<string, UserAccount>();
+
+    // 1. usersStore 기존 회원 등록
+    usersStore.forEach(u => {
+      if (u && u.username) {
+        map.set(u.username.trim().toLowerCase(), { ...u });
+      }
+    });
+
+    let hasNew = false;
+
+    const ensureUser = (rawUsername?: string, rawName?: string, rawLocation?: string, rawAvatar?: string, timestamp?: string) => {
+      const username = (rawUsername || rawName || "").trim();
+      if (!username) return;
+      const cleanKey = username.toLowerCase();
+      
+      // 테스트용 계정 제외
+      if (cleanKey.startsWith("testrandomavatar") || cleanKey === "테스트유저" || cleanKey === "테스트유저3") {
+        return;
+      }
+      const name = (rawName || rawUsername || username).trim();
+      if (name === "테스트유저" || name === "테스트유저3") return;
+
+      const existing = map.get(cleanKey);
+      const nowIso = timestamp || new Date().toISOString();
+
+      if (!existing) {
+        const newUser: UserAccount = {
+          id: `u_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+          username: username,
+          password: "DormUser!2026$Secure",
+          name: name,
+          location: rawLocation || "제1기숙사 A동 302호",
+          role: (cleanKey === "sys_admin_yeonkeun_9842" || cleanKey === "admin") ? "admin" : "user",
+          avatarUrl: rawAvatar || getRandomAvatar(),
+          createdAt: nowIso,
+          lastLoginAt: nowIso
+        };
+        map.set(cleanKey, newUser);
+        usersStore.push(newUser);
+        hasNew = true;
+      } else {
+        if (rawLocation && (!existing.location || existing.location === "기숙사")) {
+          existing.location = rawLocation;
+        }
+        if (rawAvatar && !existing.avatarUrl) {
+          existing.avatarUrl = rawAvatar;
+        }
+        if (rawName && (!existing.name || existing.name === existing.username)) {
+          existing.name = rawName;
+        }
+      }
+    };
+
+    // 2. 등록된 모든 상품의 판매자(sellerUsername, seller) 자동 발굴
+    productsStore.forEach(p => {
+      if (p) {
+        ensureUser(p.sellerUsername, p.seller, p.location, (p as any).sellerAvatar, (p as any).createdAt ? new Date((p as any).createdAt).toISOString() : undefined);
+      }
+    });
+
+    // 3. 모든 대화방의 참여자 및 메시지 전송자 자동 발굴
+    chatRoomsStore.forEach(r => {
+      if (r && Array.isArray(r.participants)) {
+        r.participants.forEach(p => {
+          if (p) {
+            ensureUser(p.username, p.name, p.location, p.avatarUrl);
+          }
+        });
+      }
+      if (r && Array.isArray(r.messages)) {
+        r.messages.forEach(m => {
+          if (m) {
+            ensureUser(m.senderUsername, m.senderName, undefined, undefined, m.createdAt ? new Date(m.createdAt).toISOString() : undefined);
+          }
+        });
+      }
+    });
+
+    // 4. 접속 및 활동 로그의 모든 유저 자동 발굴
+    accessLogsStore.forEach(l => {
+      if (l) {
+        ensureUser(l.username || l.userId, l.name, undefined, undefined, l.timestamp);
+      }
+    });
+
+    if (hasNew) {
+      saveJSON(USERS_FILE, usersStore);
+    }
+
+    return Array.from(map.values()).filter(
+      u => !u.username.toLowerCase().startsWith("testrandomavatar") && u.name !== "테스트유저" && u.name !== "테스트유저3"
+    );
+  }
+
+  // 6. 회원 목록 조회 (관리자 전용 - 자동 발굴 및 통합 적용, 아이디 및 비밀번호 확인 지원)
   app.get("/api/users", (_req, res) => {
-    const safeUsers = usersStore
-      .filter(u => !u.username.startsWith("testrandomavatar") && u.name !== "테스트유저" && u.name !== "테스트유저3")
-      .map(({ password, ...u }) => u);
+    const users = getAllDiscoveredUsers();
     return res.json({
       success: true,
-      users: safeUsers
+      users: users
     });
   });
 
@@ -598,7 +713,7 @@ export function createApp() {
   // 6-2. 로그인한 회원 목록 등록/동기화 API
   app.post("/api/users/sync-logged-in", (req, res) => {
     try {
-      const { id, username, name, location, role, lastLoginAt, avatarUrl } = req.body;
+      const { id, username, name, location, role, lastLoginAt, avatarUrl, password } = req.body;
       if (!username) {
         return res.status(400).json({ success: false, message: "username이 필요합니다." });
       }
@@ -620,11 +735,12 @@ export function createApp() {
         if (location) existingUser.location = location;
         if (role) existingUser.role = role;
         if (avatarUrl) existingUser.avatarUrl = avatarUrl;
+        if (password) existingUser.password = password;
       } else {
         const newUser: UserAccount = {
           id: id || `user_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
           username: username.trim(),
-          password: "DormUser!2026$Secure",
+          password: password || "DormUser!2026$Secure",
           name: name ? name.trim() : username.trim(),
           location: location || "제1기숙사 A동 302호",
           role: role === "admin" || username === SYSTEM_ADMIN_ACCOUNT.username ? "admin" : "user",
@@ -725,15 +841,17 @@ export function createApp() {
   // 2. 물품 등록 API
   app.post("/api/products", (req, res) => {
     try {
-      const { name, category, location, price, icon, imageUrl, image, status, seller, sellerUsername, description, tags, likes, views } = req.body;
+      const { id, name, category, location, price, icon, imageUrl, image, status, seller, sellerUsername, description, tags, likes, views } = req.body;
       if (!name) {
         return res.status(400).json({ success: false, message: "물품 이름이 필요합니다." });
       }
 
       let finalImg = imageUrl || image || undefined;
 
+      const productId = id ? String(id) : `prod_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+
       const newProduct: ServerProduct = {
-        id: `prod_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        id: productId,
         name: name.trim(),
         category: category || "기타",
         location: location || "A동 로비",
@@ -751,7 +869,12 @@ export function createApp() {
         views: views || 0
       };
 
-      productsStore.unshift(newProduct);
+      const existingIdx = productsStore.findIndex(p => String(p.id) === productId);
+      if (existingIdx !== -1) {
+        productsStore[existingIdx] = newProduct;
+      } else {
+        productsStore.unshift(newProduct);
+      }
       saveJSON(PRODUCTS_FILE, productsStore);
 
       // 접속/활동 로그 기록
@@ -802,6 +925,10 @@ export function createApp() {
 
       productsStore[prodIndex] = prod;
       saveJSON(PRODUCTS_FILE, productsStore);
+
+      if (typeof viewDelta === 'number' || typeof likeDelta === 'number') {
+        return res.json({ success: true, id: prod.id, views: prod.views, likes: prod.likes, status: prod.status });
+      }
 
       return res.json({ success: true, product: prod });
     } catch (err) {
@@ -855,17 +982,20 @@ export function createApp() {
         return res.json({ success: true, rooms: [] });
       }
 
-      // 내 계정이 참여중인 대화방만 엄격하게 검색 (제3자 계정 노출 원천 차단)
+      // 내 계정이 참여중인 대화방 검색
       const userRooms = chatRoomsStore.filter(room => {
         if (!room || !Array.isArray(room.participants)) return false;
         return room.participants.some(p => {
           const pUsername = (p.username || "").trim().toLowerCase();
+          const pName = (p.name || "").trim().toLowerCase();
           if (queryUsername) {
-            return pUsername === queryUsername;
+            if (pUsername === queryUsername || pName === queryUsername) return true;
           }
-          // queryUsername이 없는 경우에만 정확한 이름 일치(===)로만 제한 (부분 일치 제거)
-          const pName = (p.name || "").trim();
-          return queryName && pName === queryName;
+          if (queryName) {
+            const qName = queryName.toLowerCase();
+            if (pName === qName || pUsername === qName) return true;
+          }
+          return false;
         });
       });
 
@@ -994,7 +1124,12 @@ export function createApp() {
         return res.json({ success: true, room: existingRoom });
       }
 
-      const nowStr = new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
+      const nowStr = new Date().toLocaleTimeString('ko-KR', {
+        timeZone: 'Asia/Seoul',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: true
+      });
       const roomId = `room_${productId || Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 
       const initialMsgs: ServerChatMessage[] = [];
@@ -1065,25 +1200,47 @@ export function createApp() {
         return res.status(401).json({ success: false, message: "메시지를 보내려면 로그인이 필요합니다." });
       }
 
-      const roomIndex = chatRoomsStore.findIndex(r => r.id === roomId);
+      let roomIndex = chatRoomsStore.findIndex(r => r.id === roomId);
       if (roomIndex === -1) {
-        return res.status(404).json({ success: false, message: "대화방을 찾을 수 없습니다." });
+        const newRoom: ServerChatRoom = {
+          id: roomId,
+          productName: "물품 대화",
+          productPrice: "무료",
+          productIcon: "fa-solid fa-box",
+          participants: [
+            { username: senderUsername, name: senderName || "사용자", location: "기숙사", avatarUrl: "" }
+          ],
+          lastMessage: "",
+          lastTime: "방금 전",
+          updatedAt: Date.now(),
+          messages: []
+        };
+        chatRoomsStore.unshift(newRoom);
+        roomIndex = 0;
       }
 
       const room = chatRoomsStore[roomIndex];
 
-      // 엄격한 대화방 참여자 권한 검증: senderUsername이 room.participants에 속해 있는지 확인
       const sUsername = (senderUsername || "").trim().toLowerCase();
       const isParticipant = Array.isArray(room.participants) && room.participants.some(
         p => (p.username || "").trim().toLowerCase() === sUsername
       );
 
-      if (!isParticipant) {
-        console.warn(`[CHAT SECURITY] Unauthorized message attempt by ${senderUsername} to room ${roomId}`);
-        return res.status(403).json({ success: false, message: "해당 대화방의 참여자만 메시지를 전송할 수 있습니다." });
+      if (!isParticipant && Array.isArray(room.participants)) {
+        room.participants.push({
+          username: senderUsername,
+          name: senderName || "사용자",
+          location: "기숙사",
+          avatarUrl: ""
+        });
       }
 
-      const nowStr = new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
+      const nowStr = new Date().toLocaleTimeString('ko-KR', {
+        timeZone: 'Asia/Seoul',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: true
+      });
 
       const newMsg: ServerChatMessage = {
         id: `m_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
@@ -1130,10 +1287,11 @@ export function createApp() {
   // 최고 관리자 전용 실시간 통계 및 로그 API
   app.get("/api/admin/stats", (_req, res) => {
     try {
+      const discoveredUsers = getAllDiscoveredUsers();
       return res.json({
         success: true,
         stats: {
-          totalUsers: usersStore.length,
+          totalUsers: discoveredUsers.length,
           totalProducts: productsStore.length,
           completedDeals: productsStore.filter(p => p.status === '완료').length,
           activeChatRooms: chatRoomsStore.length,
@@ -1143,6 +1301,18 @@ export function createApp() {
       });
     } catch (err) {
       return res.status(500).json({ success: false, message: "관리자 통계 조회 실패" });
+    }
+  });
+
+  // 개별 활동 로그 삭제 API
+  app.delete("/api/admin/logs/:id", (req, res) => {
+    try {
+      const logId = req.params.id;
+      accessLogsStore = accessLogsStore.filter(l => String(l.id) !== String(logId));
+      saveJSON(LOGS_FILE, accessLogsStore);
+      return res.json({ success: true, message: "로그가 삭제되었습니다.", remainingLogsCount: accessLogsStore.length });
+    } catch (err) {
+      return res.status(500).json({ success: false, message: "로그 삭제 실패" });
     }
   });
 

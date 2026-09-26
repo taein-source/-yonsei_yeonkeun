@@ -1,0 +1,20 @@
+{
+  "teststudent99": {
+    "userId": "teststudent99",
+    "wishlist": [
+      "1",
+      2
+    ],
+    "purchasedProductIds": [],
+    "createdProductIds": []
+  },
+  "user_1789477110739_9k9ea": {
+    "userId": "user_1789477110739_9k9ea",
+    "wishlist": [
+      "item_1",
+      "item_2"
+    ],
+    "purchasedProductIds": [],
+    "createdProductIds": []
+  }
+}

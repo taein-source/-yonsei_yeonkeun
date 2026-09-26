@@ -9,21 +9,9 @@
  *    - 환경 변수가 비어 있으면 기존과 동일하게 상대 경로('/api/...')를 사용하여 프록시/리라이트와 완벽 호환
  */
 
-const rawApiUrl: string = (
-  (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_API_URL) ||
-  (typeof import.meta !== 'undefined' && (import.meta as any).env?.NEXT_PUBLIC_API_URL) ||
-  ''
-).trim().replace(/\/+$/, '');
-
-// 구글 AI Studio 개발 샌드박스 주소(ais-dev-... / ais-pre-...)는 구글 내부 쿠키 인증이 걸려 있어
-// Vercel 등 외부 도메인에서 브라우저 fetch로 직접 호출 시 302 리다이렉트 및 CORS 오류가 발생합니다.
-// 따라서 Vercel 등 외부 호스팅 환경에서 해당 URL이 지정된 경우, 외부 샌드박스 대신 Vercel 자체 서버리스(/api)를 타도록 자동 대체합니다.
-const isInternalAiStudioSandbox = /ais-(dev|pre)-.*\.run\.app/i.test(rawApiUrl);
-const isExternalOrigin = typeof window !== 'undefined' && 
-  window.location.hostname !== 'localhost' && 
-  !window.location.hostname.includes('run.app');
-
-export const API_BASE_URL: string = (isInternalAiStudioSandbox && isExternalOrigin) ? '' : rawApiUrl;
+// 기본 상대 경로('')를 사용하며, Vercel 등의 환경변수에 VITE_API_URL이 설정된 경우 해당 절대 URL을 사용합니다.
+const rawEnvUrl = (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_API_URL) || '';
+export const API_BASE_URL: string = rawEnvUrl ? rawEnvUrl.replace(/\/$/, '') : '';
 
 
 /**

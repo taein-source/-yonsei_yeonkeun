@@ -19,6 +19,28 @@
     "role": "user",
     "avatarUrl": "https://i.ibb.co/tTvSdxFv/samplepic2.png",
     "createdAt": "2026-09-15T10:36:51.691Z",
-    "lastLoginAt": "2026-09-15T11:05:04.907Z"
+    "lastLoginAt": "2026-09-15T13:00:52.847Z"
+  },
+  {
+    "id": "user_1789477110739_9k9ea",
+    "username": "teststudent99",
+    "password": "Password123!",
+    "name": "테스트학생",
+    "location": "제1기숙사 A동 101호",
+    "role": "user",
+    "avatarUrl": "https://i.ibb.co/tTvSdxFv/samplepic2.png",
+    "createdAt": "2026-09-15T12:58:30.739Z",
+    "lastLoginAt": "2026-09-15T13:07:13.357Z"
+  },
+  {
+    "id": "user_1789477180138_c89vp",
+    "username": "newuser123",
+    "password": "Password123!",
+    "name": "김연세",
+    "location": "제2기숙사 B동 204호",
+    "role": "user",
+    "avatarUrl": "https://i.ibb.co/tTvSdxFv/samplepic2.png",
+    "createdAt": "2026-09-15T12:59:40.138Z",
+    "lastLoginAt": "2026-09-15T12:59:42.645Z"
   }
 ]
