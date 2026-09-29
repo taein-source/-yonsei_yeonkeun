@@ -30,6 +30,7 @@ import {
   checkUsernameAvailabilityFirestore,
   loginFirestoreUser,
   registerFirestoreUser,
+  findSellerUsernameFromFirestore,
   formatKoreanChatTime,
   Product 
 } from './firebase';
@@ -138,9 +139,21 @@ export default function App() {
       return;
     }
 
-    // 판매자 아이디 추출 (없을 경우 seller 이름을 기반으로 식별 가능한 영문/숫자 아이디 생성)
-    const cleanSellerUsername = (product.sellerUsername || '').trim() || 
-      `user_${encodeURIComponent(sellerName.replace(/\s+/g, '_')).replace(/%/g, '').toLowerCase().substring(0, 15) || 'seller'}`;
+    // 2번 문제 해결: 판매자 아이디 추출 (sellerUsername이 비어있더라도 Firestore의 users 컬렉션을 조회하여 상대방의 진짜 아이디를 정확히 찾아 대화방 개설)
+    let cleanSellerUsername = (product.sellerUsername || '').trim();
+    if (!cleanSellerUsername) {
+      try {
+        const realSellerUsername = await findSellerUsernameFromFirestore(sellerName, product.location);
+        if (realSellerUsername) {
+          cleanSellerUsername = realSellerUsername;
+        }
+      } catch (e) {
+        console.warn("Failed to find seller username in Firestore:", e);
+      }
+    }
+    if (!cleanSellerUsername) {
+      cleanSellerUsername = `user_${encodeURIComponent(sellerName.replace(/\s+/g, '_')).replace(/%/g, '').toLowerCase().substring(0, 15) || 'seller'}`;
+    }
 
     try {
       const room = await getOrCreateFirestoreChatRoom({

@@ -14,7 +14,8 @@ import {
   orderBy, 
   increment,
   setDoc,
-  getDocFromServer
+  getDocFromServer,
+  arrayUnion
 } from "firebase/firestore";
 import {
   getStorage,
@@ -25,7 +26,7 @@ import {
 } from "firebase/storage";
 import firebaseConfigJson from "../firebase-applet-config.json";
 import { compressImage } from "./utils/imageCompressor";
-import { getApiUrl, getAssetUrl } from "./utils/api";
+import { getApiUrl, getAssetUrl, API_BASE_URL } from "./utils/api";
 
 // Firebase Configuration from provisioned configuration
 const firebaseConfig = {
@@ -874,28 +875,25 @@ export const subscribeUserChatRooms = (
     callback(allRooms);
   };
 
-  // 2. Fetch backend rooms
-  const fetchBackendRooms = async () => {
-    try {
-      const res = await fetch(getApiUrl(`/api/chats?username=${encodeURIComponent(username)}`));
-      if (res.ok) {
-        const data = await res.json();
-        if (data.success && Array.isArray(data.rooms)) {
-          mergeAndNotify(data.rooms);
+  // 2. 백엔드 보조 조회 (오프라인이거나 별도 VITE_API_URL이 설정된 경우에만 1회성 보조 조회)
+  if (!isFirebaseAvailable && API_BASE_URL) {
+    const fetchBackendRooms = async () => {
+      try {
+        const res = await fetch(getApiUrl(`/api/chats?username=${encodeURIComponent(username)}`));
+        if (res.ok) {
+          const data = await res.json();
+          if (data.success && Array.isArray(data.rooms)) {
+            mergeAndNotify(data.rooms);
+          }
         }
+      } catch (err) {
+        console.warn("Backend chat fetch fallback warning:", err);
       }
-    } catch (err) {
-      console.warn("Backend chat fetch fallback warning:", err);
-    }
-  };
+    };
+    fetchBackendRooms();
+  }
 
-  // Run backend fetch immediately and every 5 seconds
-  fetchBackendRooms();
-  const pollInterval = setInterval(() => {
-    if (!isUnsubscribed) fetchBackendRooms();
-  }, 5000);
-
-  // 3. Firestore onSnapshot real-time listener
+  // 3. 순수 Firestore onSnapshot 실시간 리스너 (Vercel 배포에 최적화된 즉각 동기화)
   if (isFirebaseAvailable && db) {
     try {
       const q = query(
@@ -927,19 +925,16 @@ export const subscribeUserChatRooms = (
           mergeAndNotify(rooms);
         },
         (error) => {
-          console.warn("Firestore chat subscription error, relying on backend/cache:", error);
-          fetchBackendRooms();
+          console.warn("Firestore chat subscription error:", error);
         }
       );
     } catch (e) {
       console.error("Failed to initialize Firestore chat subscriber:", e);
-      fetchBackendRooms();
     }
   }
 
   return () => {
     isUnsubscribed = true;
-    clearInterval(pollInterval);
     if (unsubscribeFirestore) {
       unsubscribeFirestore();
     }
@@ -1007,30 +1002,7 @@ export const subscribeRoomMessages = (
     callback(list);
   };
 
-  // Fallback / sync from backend
-  const fetchBackendMessages = async () => {
-    try {
-      const res = await fetch(getApiUrl(`/api/chats`));
-      if (res.ok) {
-        const data = await res.json();
-        if (data.success && Array.isArray(data.rooms)) {
-          const room = data.rooms.find((r: any) => r.id === roomId);
-          if (room && Array.isArray(room.messages)) {
-            room.messages.forEach((m: any) => {
-              if (m && m.id) {
-                const kstTime = m.createdAt ? formatKoreanChatTime(m.createdAt) : formatKoreanChatTime(m.timestamp);
-                msgMap.set(m.id, { ...m, timestamp: kstTime });
-              }
-            });
-            emitMessages();
-          }
-        }
-      }
-    } catch {}
-  };
-
-  fetchBackendMessages();
-
+  // 3번 최적화: 순수 Firestore onSnapshot 실시간 리스너 (Vercel 배포 시 404 오류 방지 및 즉각 반영)
   if (isFirebaseAvailable && db) {
     try {
       const messagesRef = collection(db, "chats", roomId, "messages");
@@ -1063,6 +1035,29 @@ export const subscribeRoomMessages = (
     } catch (e) {
       console.error(`Failed to setup messages subscriber for ${roomId}:`, e);
     }
+  } else if (API_BASE_URL) {
+    // 오프라인이거나 별도 백엔드 URL이 있을 때만 보조 조회
+    const fetchBackendMessages = async () => {
+      try {
+        const res = await fetch(getApiUrl(`/api/chats`));
+        if (res.ok) {
+          const data = await res.json();
+          if (data.success && Array.isArray(data.rooms)) {
+            const room = data.rooms.find((r: any) => r.id === roomId);
+            if (room && Array.isArray(room.messages)) {
+              room.messages.forEach((m: any) => {
+                if (m && m.id) {
+                  const kstTime = m.createdAt ? formatKoreanChatTime(m.createdAt) : formatKoreanChatTime(m.timestamp);
+                  msgMap.set(m.id, { ...m, timestamp: kstTime });
+                }
+              });
+              emitMessages();
+            }
+          }
+        }
+      } catch {}
+    };
+    fetchBackendMessages();
   }
 
   return () => {
@@ -1091,8 +1086,19 @@ export const getOrCreateFirestoreChatRoom = async (params: {
   productIcon?: string;
   initialMessage?: string;
 }): Promise<FirestoreChatRoom> => {
-  const cleanMyUsername = params.myUsername.trim().toLowerCase();
-  const cleanTargetUsername = params.targetUsername.trim().toLowerCase();
+  let cleanMyUsername = params.myUsername.trim().toLowerCase();
+  let cleanTargetUsername = params.targetUsername.trim().toLowerCase();
+
+  // 2번 기능: sellerUsername이 비어있거나 가짜 아이디(user_...)인 경우 Firestore users 컬렉션에서 상대방의 진짜 아이디 탐색
+  if ((!cleanTargetUsername || cleanTargetUsername.startsWith("user_")) && params.targetName) {
+    try {
+      const realUsername = await findSellerUsernameFromFirestore(params.targetName, params.targetLocation);
+      if (realUsername) {
+        cleanTargetUsername = realUsername.trim().toLowerCase();
+        params.targetUsername = realUsername.trim();
+      }
+    } catch {}
+  }
 
   // 1. Sync with backend API
   let serverRoom: FirestoreChatRoom | null = null;
@@ -1112,8 +1118,14 @@ export const getOrCreateFirestoreChatRoom = async (params: {
     console.warn("Backend chat room creation error:", err);
   }
 
+  // 1번 문제 해결: 두 참여자의 아이디를 정렬하여 고정된 대화방 ID(Deterministic Room ID) 생성
+  // (무작위 난수 생성을 제거하여 누가 접속하든 언제나 100% 동일한 단 하나의 대화방으로 매칭)
+  const sortedUserPair = [cleanMyUsername, cleanTargetUsername].sort().join("__");
+  const cleanProdId = params.productId ? String(params.productId).trim() : "chat";
+  const deterministicRoomId = `room_${cleanProdId}_${sortedUserPair}`;
+
   // Determine standard room ID
-  const roomId = serverRoom?.id || `room_${params.productId || Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+  const roomId = serverRoom?.id || deterministicRoomId;
 
   const participants: FirestoreChatParticipant[] = [
     { username: params.myUsername.trim(), name: params.myName.trim(), location: params.myLocation || "기숙사", avatarUrl: params.myAvatar },
@@ -1155,7 +1167,7 @@ export const getOrCreateFirestoreChatRoom = async (params: {
       if (!docSnap.exists()) {
         await setDoc(roomRef, roomData, { merge: true });
       } else {
-        // Update participants info and union usernames
+        // 기존 대화방의 마지막 대화 내역 및 시간 보존
         const existingData = docSnap.data();
         const existingUsernames = existingData.participantUsernames || [];
         await updateDoc(roomRef, {
@@ -1163,6 +1175,10 @@ export const getOrCreateFirestoreChatRoom = async (params: {
           participantUsernames: Array.from(new Set([...existingUsernames, ...participantUsernames])),
           updatedAt: Date.now()
         });
+        roomData.lastMessage = existingData.lastMessage || roomData.lastMessage;
+        roomData.lastTime = existingData.lastTime || roomData.lastTime;
+        roomData.updatedAt = existingData.updatedAt || roomData.updatedAt;
+        roomData.messages = existingData.messages || [];
       }
 
       // If initialMessage provided, add to subcollection
@@ -1335,6 +1351,46 @@ export const sendFirestoreChatMessage = async (params: {
   } catch {}
 
   return messageData;
+};
+
+/**
+ * 2번 기능: sellerUsername이 비어있을 때 Firestore의 users 컬렉션을 조회하여 상대방의 진짜 아이디 탐색
+ */
+export const findSellerUsernameFromFirestore = async (
+  sellerNameRaw: string,
+  sellerLocation?: string
+): Promise<string | null> => {
+  if (!sellerNameRaw) return null;
+  // "홍길동 (제1기숙사 A동 302호)" 같은 형태에서 순수 이름 추출
+  const cleanName = sellerNameRaw.replace(/\(.*?\)/g, "").trim().toLowerCase();
+  if (!cleanName || !isFirebaseAvailable || !db) return null;
+
+  try {
+    const snap = await getDocs(collection(db, "users"));
+    let candidateUsername: string | null = null;
+
+    snap.forEach((docSnap) => {
+      const data = docSnap.data();
+      if (!data || !data.username) return;
+
+      const uName = (data.name || "").trim().toLowerCase();
+      const uLoc = (data.location || "").trim().toLowerCase();
+
+      // 1. 이름과 기숙사 위치가 모두 일치하는 경우 우선 확정
+      if (sellerLocation && uName === cleanName && uLoc.includes(sellerLocation.trim().toLowerCase())) {
+        candidateUsername = data.username.trim();
+      }
+      // 2. 이름이 일치하는 경우 후보 등록
+      else if (!candidateUsername && (uName === cleanName || uName === sellerNameRaw.trim().toLowerCase())) {
+        candidateUsername = data.username.trim();
+      }
+    });
+
+    return candidateUsername;
+  } catch (err) {
+    console.warn("Firestore findSellerUsername error:", err);
+    return null;
+  }
 };
 
 // ----------------------------------------
