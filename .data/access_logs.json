@@ -1,5 +1,17 @@
 [
   {
+    "id": "log_1790681928178_07h",
+    "userId": "jongho061026",
+    "username": "jongho061026",
+    "name": "끼끼404",
+    "role": "user",
+    "action": "CHAT_ROOM_CREATE",
+    "details": "1:1 대화방 생성: [끼끼404] ↔ [시스템 최고 관리자] (중호 바~보)",
+    "ip": "127.0.0.1",
+    "userAgent": "curl/7.88.1",
+    "timestamp": "2026-09-29T11:38:48.179Z"
+  },
+  {
     "id": "log_1790397449080_jkw",
     "userId": "testuser1",
     "username": "testuser1",

@@ -139,13 +139,13 @@ export default function App() {
       return;
     }
 
-    // 2번 문제 해결: 판매자 아이디 추출 (sellerUsername이 비어있더라도 Firestore의 users 컬렉션을 조회하여 상대방의 진짜 아이디를 정확히 찾아 대화방 개설)
-    let cleanSellerUsername = (product.sellerUsername || '').trim();
+    // 2번 문제 해결: 판매자 아이디 추출 및 @ 정규화
+    let cleanSellerUsername = (product.sellerUsername || '').trim().replace(/^@+/, '');
     if (!cleanSellerUsername) {
       try {
         const realSellerUsername = await findSellerUsernameFromFirestore(sellerName, product.location);
         if (realSellerUsername) {
-          cleanSellerUsername = realSellerUsername;
+          cleanSellerUsername = realSellerUsername.trim().replace(/^@+/, '');
         }
       } catch (e) {
         console.warn("Failed to find seller username in Firestore:", e);
@@ -155,9 +155,11 @@ export default function App() {
       cleanSellerUsername = `user_${encodeURIComponent(sellerName.replace(/\s+/g, '_')).replace(/%/g, '').toLowerCase().substring(0, 15) || 'seller'}`;
     }
 
+    const myNormUsername = (currentUser.username || '').trim().replace(/^@+/, '');
+
     try {
       const room = await getOrCreateFirestoreChatRoom({
-        myUsername: currentUser.username,
+        myUsername: myNormUsername,
         myName: currentUser.name,
         myLocation: currentUser.location,
         myAvatar: currentUser.avatarUrl,
@@ -172,13 +174,14 @@ export default function App() {
       });
 
       if (room) {
-        const counterpart = (room.participants || []).find((p: any) => 
-          p.username && p.username.trim().toLowerCase() !== currentUser.username.trim().toLowerCase()
-        ) || (room.participants || []).find((p: any) => p.name !== currentUser.name) || (room.participants || [])[1] || (room.participants || [])[0] || { name: sellerName, location: product.location, avatarUrl: '', username: cleanSellerUsername };
+        const counterpart = (room.participants || []).find((p: any) => {
+          const pUser = (p.username || '').trim().replace(/^@+/, '').toLowerCase();
+          return pUser && pUser !== myNormUsername.toLowerCase();
+        }) || (room.participants || []).find((p: any) => p.name !== currentUser.name) || (room.participants || [])[1] || (room.participants || [])[0] || { name: sellerName, location: product.location, avatarUrl: '', username: cleanSellerUsername };
 
         const partnerObj: ChatPartner = {
           id: room.id,
-          partnerUsername: (counterpart as any).username || cleanSellerUsername,
+          partnerUsername: ((counterpart as any).username || cleanSellerUsername).trim().replace(/^@+/, ''),
           name: `${counterpart.name} (${counterpart.location || '기숙사'})`,
           room: counterpart.location || '기숙사',
           avatar: counterpart.avatarUrl || DEFAULT_AVATAR,
@@ -189,13 +192,16 @@ export default function App() {
           lastTime: room.lastTime || '방금 전',
           unreadCount: 0,
           mannerTemp: 36.5,
-          messages: (room.messages || []).map((m: any) => ({
-            id: m.id,
-            sender: (m.senderUsername && m.senderUsername.trim().toLowerCase() === currentUser.username.trim().toLowerCase()) ? 'me' : 'partner',
-            text: m.text,
-            timestamp: m.createdAt ? formatKoreanChatTime(m.createdAt) : formatKoreanChatTime(m.timestamp),
-            imageUrl: m.imageUrl
-          }))
+          messages: (room.messages || []).map((m: any) => {
+            const mSender = (m.senderUsername || '').trim().replace(/^@+/, '').toLowerCase();
+            return {
+              id: m.id,
+              sender: (mSender && mSender === myNormUsername.toLowerCase()) ? 'me' : 'partner',
+              text: m.text,
+              timestamp: m.createdAt ? formatKoreanChatTime(m.createdAt) : formatKoreanChatTime(m.timestamp),
+              imageUrl: m.imageUrl
+            };
+          })
         };
 
         setSelectedChatPartner(partnerObj);
@@ -253,11 +259,11 @@ export default function App() {
       try {
         await sendFirestoreChatMessage({
           roomId: selectedChatPartner.id,
-          senderUsername: currentUser.username,
+          senderUsername: (currentUser.username || '').trim().replace(/^@+/, ''),
           senderName: currentUser.name,
           senderAvatar: currentUser.avatarUrl,
           senderLocation: currentUser.location,
-          targetUsername: selectedChatPartner.partnerUsername,
+          targetUsername: (selectedChatPartner.partnerUsername || '').trim().replace(/^@+/, ''),
           targetName: selectedChatPartner.name,
           targetAvatar: selectedChatPartner.avatar,
           targetLocation: selectedChatPartner.room,
@@ -372,19 +378,24 @@ export default function App() {
       return;
     }
 
-    const unsubscribeRooms = subscribeUserChatRooms(currentUser.username, (rooms) => {
+    const myNormUsername = (currentUser.username || '').trim().replace(/^@+/, '');
+    const unsubscribeRooms = subscribeUserChatRooms(myNormUsername, (rooms) => {
       const partners: ChatPartner[] = rooms.map((room: any) => {
-        const counterpart = (room.participants || []).find((p: any) => 
-          p.username && p.username.trim().toLowerCase() !== currentUser.username.trim().toLowerCase()
-        ) || (room.participants || []).find((p: any) => p.name !== currentUser.name) || (room.participants || [])[0] || { name: '상대방', location: '기숙사', avatarUrl: '' };
+        const counterpart = (room.participants || []).find((p: any) => {
+          const pUser = (p.username || '').trim().replace(/^@+/, '').toLowerCase();
+          return pUser && pUser !== myNormUsername.toLowerCase();
+        }) || (room.participants || []).find((p: any) => p.name !== currentUser.name) || (room.participants || [])[0] || { name: '상대방', location: '기숙사', avatarUrl: '' };
 
-        const parsedMessages = (room.messages || []).map((m: any) => ({
-          id: m.id,
-          sender: (m.senderUsername && m.senderUsername.trim().toLowerCase() === currentUser.username.trim().toLowerCase()) ? 'me' : 'partner',
-          text: m.text,
-          timestamp: m.timestamp,
-          imageUrl: m.imageUrl
-        }));
+        const parsedMessages = (room.messages || []).map((m: any) => {
+          const mSender = (m.senderUsername || '').trim().replace(/^@+/, '').toLowerCase();
+          return {
+            id: m.id,
+            sender: (mSender && mSender === myNormUsername.toLowerCase()) ? 'me' : 'partner',
+            text: m.text,
+            timestamp: m.timestamp,
+            imageUrl: m.imageUrl
+          };
+        });
 
         const isCurrentlyActiveRoom = (currentView === 'chat' && selectedChatPartner?.id === room.id);
         const unreadMsgs = parsedMessages.filter((m: any) => 
@@ -393,7 +404,7 @@ export default function App() {
 
         return {
           id: room.id,
-          partnerUsername: counterpart.username || '',
+          partnerUsername: ((counterpart as any).username || '').trim().replace(/^@+/, ''),
           name: `${counterpart.name} (${counterpart.location || '기숙사'})`,
           room: counterpart.location || '기숙사',
           avatar: counterpart.avatarUrl || DEFAULT_AVATAR,
@@ -436,16 +447,20 @@ export default function App() {
   useEffect(() => {
     if (!selectedChatPartner?.id || !currentUser) return;
 
+    const myNormUser = (currentUser.username || '').trim().replace(/^@+/, '').toLowerCase();
     const unsubscribeMessages = subscribeRoomMessages(selectedChatPartner.id, (msgs) => {
       if (!msgs || msgs.length === 0) return;
 
-      const parsed: ChatMessage[] = msgs.map(m => ({
-        id: m.id,
-        sender: (m.senderUsername && m.senderUsername.trim().toLowerCase() === currentUser.username.trim().toLowerCase()) ? 'me' : 'partner',
-        text: m.text,
-        timestamp: m.createdAt ? formatKoreanChatTime(m.createdAt) : formatKoreanChatTime(m.timestamp),
-        imageUrl: m.imageUrl
-      }));
+      const parsed: ChatMessage[] = msgs.map(m => {
+        const mSender = (m.senderUsername || '').trim().replace(/^@+/, '').toLowerCase();
+        return {
+          id: m.id,
+          sender: (mSender && mSender === myNormUser) ? 'me' : 'partner',
+          text: m.text,
+          timestamp: m.createdAt ? formatKoreanChatTime(m.createdAt) : formatKoreanChatTime(m.timestamp),
+          imageUrl: m.imageUrl
+        };
+      });
 
       setSelectedChatPartner(prev => {
         if (!prev || prev.id !== selectedChatPartner.id) return prev;

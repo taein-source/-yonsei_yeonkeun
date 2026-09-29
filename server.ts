@@ -975,7 +975,7 @@ export function createApp() {
   // 1. 내 대화방 목록 조회 (상대방 최신 프로필 사진 및 정보 실시간 동기화)
   app.get("/api/chats", (req, res) => {
     try {
-      const queryUsername = (req.query.username as string || "").trim().toLowerCase();
+      const queryUsername = (req.query.username as string || "").trim().replace(/^@+/, '').toLowerCase();
       const queryName = (req.query.name as string || "").trim();
 
       if (!queryUsername && !queryName) {
@@ -986,7 +986,7 @@ export function createApp() {
       const userRooms = chatRoomsStore.filter(room => {
         if (!room || !Array.isArray(room.participants)) return false;
         return room.participants.some(p => {
-          const pUsername = (p.username || "").trim().toLowerCase();
+          const pUsername = (p.username || "").trim().replace(/^@+/, '').toLowerCase();
           const pName = (p.name || "").trim().toLowerCase();
           if (queryUsername) {
             if (pUsername === queryUsername || pName === queryUsername) return true;
@@ -1051,13 +1051,17 @@ export function createApp() {
         initialMessage
       } = req.body;
 
+      // 아이디 정규화: @ 접두사 제거
+      const normMyUsername = (myUsername || "").trim().replace(/^@+/, "");
+      const normTargetUsername = (targetUsername || "").trim().replace(/^@+/, "");
+
       // 내 유저 정보 usersStore 조회
       const myUser = usersStore.find(u => {
-        const uUsername = (u.username || "").trim().toLowerCase();
-        return myUsername && uUsername === myUsername.trim().toLowerCase();
+        const uUsername = (u.username || "").trim().replace(/^@+/, "").toLowerCase();
+        return normMyUsername && uUsername === normMyUsername.toLowerCase();
       });
 
-      const resMyUsername = (myUser?.username || myUsername || "").trim();
+      const resMyUsername = (myUser?.username || normMyUsername || "").trim().replace(/^@+/, "");
       const resMyName = myUser?.name || myName || "나";
       const resMyLocation = myUser?.location || myLocation || "기숙사";
       const resMyAvatar = myUser?.avatarUrl || myAvatar || SYSTEM_ADMIN_AVATAR;
@@ -1068,8 +1072,8 @@ export function createApp() {
 
       // 상대방 유저 정보 usersStore 조회
       let targetUser = usersStore.find(u => {
-        const uUsername = (u.username || "").trim().toLowerCase();
-        return targetUsername && uUsername === targetUsername.trim().toLowerCase();
+        const uUsername = (u.username || "").trim().replace(/^@+/, "").toLowerCase();
+        return normTargetUsername && uUsername === normTargetUsername.toLowerCase();
       });
 
       // targetUsername으로 못 찾았을 경우 정확한 이름 일치(===)로만 조회
@@ -1081,7 +1085,7 @@ export function createApp() {
         });
       }
 
-      const resTargetUsername = (targetUser?.username || targetUsername || "").trim();
+      const resTargetUsername = (targetUser?.username || normTargetUsername || "").trim().replace(/^@+/, "");
       const resTargetName = targetUser?.name || targetName || "기숙사 메이트";
       const resTargetLocation = targetUser?.location || targetLocation || "기숙사";
       const resTargetAvatar = targetUser?.avatarUrl || targetAvatar || SYSTEM_ADMIN_AVATAR;
@@ -1098,22 +1102,21 @@ export function createApp() {
       const cleanMyUsername = resMyUsername.toLowerCase();
       const cleanTargetUsername = resTargetUsername.toLowerCase();
 
-      // 1번 문제 해결: 두 참여자의 아이디를 정렬하여 고정된 대화방 ID(Deterministic Room ID) 생성
-      // (무작위 난수 생성을 제거하여 누가 어디서 접속하든 언제나 100% 동일한 단 하나의 대화방으로 매칭)
-      const sortedUserPair = [cleanMyUsername, cleanTargetUsername].sort().join("__");
+      // Room ID 생성 100% 단일화:
+      // 무작위 난수를 100% 배제하고, 두 참여자의 정규화된 아이디를 정렬하여 고정된 단일 Room ID(Deterministic Room ID) 생성
       const cleanProdId = productId ? String(productId).trim() : "chat";
-      const deterministicRoomId = (req.body.roomId && String(req.body.roomId).startsWith("room_"))
-        ? String(req.body.roomId).trim()
-        : `room_${cleanProdId}_${sortedUserPair}`;
+      const sortedUserPair = [cleanMyUsername, cleanTargetUsername].sort().join("__");
+      const deterministicRoomId = `room_${cleanProdId}_${sortedUserPair}`;
       const roomId = deterministicRoomId;
 
-      // 기존 1:1 대화방 검색: 고정 방 ID 또는 두 참여자로 조회
+      // 기존 1:1 대화방 검색:
+      // 반드시 정확히 나와 상대방(2명)만 참여하고 있는 방 또는 동일 deterministicRoomId 검색
       let existingRoom = chatRoomsStore.find(room => {
         if (!room) return false;
-        if (room.id === roomId) return true;
+        if (room.id === deterministicRoomId) return true;
         if (!Array.isArray(room.participants) || room.participants.length !== 2) return false;
         
-        const pUsernames = room.participants.map(p => (p.username || "").trim().toLowerCase());
+        const pUsernames = room.participants.map(p => (p.username || "").trim().replace(/^@+/, '').toLowerCase());
         const isExactTwoParticipants = pUsernames.includes(cleanMyUsername) && pUsernames.includes(cleanTargetUsername);
         if (!isExactTwoParticipants) return false;
 
@@ -1125,8 +1128,8 @@ export function createApp() {
       });
 
       if (existingRoom) {
-        // 방 ID를 고정 ID로 보장 및 최신 프로필 정보 업데이트
-        existingRoom.id = roomId;
+        existingRoom.id = deterministicRoomId;
+        // 최신 프로필 정보 업데이트
         existingRoom.participants = [
           { username: resMyUsername, name: resMyName, location: resMyLocation, avatarUrl: resMyAvatar },
           { username: resTargetUsername, name: resTargetName, location: resTargetLocation, avatarUrl: resTargetAvatar }
@@ -1206,7 +1209,8 @@ export function createApp() {
         return res.status(400).json({ success: false, message: "메시지 내용이나 사진을 입력하세요." });
       }
 
-      if (!senderUsername) {
+      const normSenderUsername = (senderUsername || "").trim().replace(/^@+/, "");
+      if (!normSenderUsername) {
         return res.status(401).json({ success: false, message: "메시지를 보내려면 로그인이 필요합니다." });
       }
 
@@ -1218,7 +1222,7 @@ export function createApp() {
           productPrice: "무료",
           productIcon: "fa-solid fa-box",
           participants: [
-            { username: senderUsername, name: senderName || "사용자", location: "기숙사", avatarUrl: "" }
+            { username: normSenderUsername, name: senderName || "사용자", location: "기숙사", avatarUrl: "" }
           ],
           lastMessage: "",
           lastTime: "방금 전",
@@ -1231,14 +1235,14 @@ export function createApp() {
 
       const room = chatRoomsStore[roomIndex];
 
-      const sUsername = (senderUsername || "").trim().toLowerCase();
+      const sUsername = normSenderUsername.toLowerCase();
       const isParticipant = Array.isArray(room.participants) && room.participants.some(
-        p => (p.username || "").trim().toLowerCase() === sUsername
+        p => (p.username || "").trim().replace(/^@+/, '').toLowerCase() === sUsername
       );
 
       if (!isParticipant && Array.isArray(room.participants)) {
         room.participants.push({
-          username: senderUsername,
+          username: normSenderUsername,
           name: senderName || "사용자",
           location: "기숙사",
           avatarUrl: ""
