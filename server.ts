@@ -1098,10 +1098,20 @@ export function createApp() {
       const cleanMyUsername = resMyUsername.toLowerCase();
       const cleanTargetUsername = resTargetUsername.toLowerCase();
 
-      // 기존 1:1 대화방 검색:
-      // 반드시 정확히 나와 상대방(2명)만 참여하고 있는 방이어야 하며, 제3자(C)의 방과 절대 혼용되지 않음
+      // 1번 문제 해결: 두 참여자의 아이디를 정렬하여 고정된 대화방 ID(Deterministic Room ID) 생성
+      // (무작위 난수 생성을 제거하여 누가 어디서 접속하든 언제나 100% 동일한 단 하나의 대화방으로 매칭)
+      const sortedUserPair = [cleanMyUsername, cleanTargetUsername].sort().join("__");
+      const cleanProdId = productId ? String(productId).trim() : "chat";
+      const deterministicRoomId = (req.body.roomId && String(req.body.roomId).startsWith("room_"))
+        ? String(req.body.roomId).trim()
+        : `room_${cleanProdId}_${sortedUserPair}`;
+      const roomId = deterministicRoomId;
+
+      // 기존 1:1 대화방 검색: 고정 방 ID 또는 두 참여자로 조회
       let existingRoom = chatRoomsStore.find(room => {
-        if (!room || !Array.isArray(room.participants) || room.participants.length !== 2) return false;
+        if (!room) return false;
+        if (room.id === roomId) return true;
+        if (!Array.isArray(room.participants) || room.participants.length !== 2) return false;
         
         const pUsernames = room.participants.map(p => (p.username || "").trim().toLowerCase());
         const isExactTwoParticipants = pUsernames.includes(cleanMyUsername) && pUsernames.includes(cleanTargetUsername);
@@ -1115,7 +1125,8 @@ export function createApp() {
       });
 
       if (existingRoom) {
-        // 최신 프로필 정보 업데이트
+        // 방 ID를 고정 ID로 보장 및 최신 프로필 정보 업데이트
+        existingRoom.id = roomId;
         existingRoom.participants = [
           { username: resMyUsername, name: resMyName, location: resMyLocation, avatarUrl: resMyAvatar },
           { username: resTargetUsername, name: resTargetName, location: resTargetLocation, avatarUrl: resTargetAvatar }
@@ -1130,7 +1141,6 @@ export function createApp() {
         minute: '2-digit',
         hour12: true
       });
-      const roomId = `room_${productId || Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 
       const initialMsgs: ServerChatMessage[] = [];
       if (initialMessage && initialMessage.trim()) {

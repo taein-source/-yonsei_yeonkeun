@@ -52,7 +52,16 @@
         },
         "lastMessage": { "type": "string", "description": "마지막 대화 내용" },
         "lastTime": { "type": "string", "description": "마지막 대화 시간" },
-        "updatedAt": { "type": "number", "description": "수정 시각 (timestamp ms)" }
+        "updatedAt": { "type": "number", "description": "수정 시각 (timestamp ms)" },
+        "messages": {
+          "type": "array",
+          "description": "대화방 메시지 내역"
+        },
+        "logs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "대화방 활동 및 상태 로그"
+        }
       },
       "required": ["id", "participants", "participantUsernames", "updatedAt"]
     },

@@ -813,6 +813,8 @@ export interface FirestoreChatRoom {
   lastTime?: string;
   updatedAt: number;
   messages?: FirestoreChatMessage[];
+  logs?: string[];
+  createdAt?: number;
 }
 
 /**
@@ -1100,13 +1102,23 @@ export const getOrCreateFirestoreChatRoom = async (params: {
     } catch {}
   }
 
+  // 1번 문제 해결: 두 참여자의 아이디를 정렬하여 고정된 대화방 ID(Deterministic Room ID) 생성
+  // (무작위 난수 생성을 제거하여 누가 어디서 접속하든 언제나 100% 동일한 단 하나의 대화방으로 매칭)
+  const sortedUserPair = [cleanMyUsername, cleanTargetUsername].sort().join("__");
+  const cleanProdId = params.productId ? String(params.productId).trim() : "chat";
+  const deterministicRoomId = `room_${cleanProdId}_${sortedUserPair}`;
+  const roomId = deterministicRoomId;
+
   // 1. Sync with backend API
   let serverRoom: FirestoreChatRoom | null = null;
   try {
     const res = await fetch(getApiUrl("/api/chats/room"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(params)
+      body: JSON.stringify({
+        ...params,
+        roomId: deterministicRoomId
+      })
     });
     if (res.ok) {
       const data = await res.json();
@@ -1117,15 +1129,6 @@ export const getOrCreateFirestoreChatRoom = async (params: {
   } catch (err) {
     console.warn("Backend chat room creation error:", err);
   }
-
-  // 1번 문제 해결: 두 참여자의 아이디를 정렬하여 고정된 대화방 ID(Deterministic Room ID) 생성
-  // (무작위 난수 생성을 제거하여 누가 접속하든 언제나 100% 동일한 단 하나의 대화방으로 매칭)
-  const sortedUserPair = [cleanMyUsername, cleanTargetUsername].sort().join("__");
-  const cleanProdId = params.productId ? String(params.productId).trim() : "chat";
-  const deterministicRoomId = `room_${cleanProdId}_${sortedUserPair}`;
-
-  // Determine standard room ID
-  const roomId = serverRoom?.id || deterministicRoomId;
 
   const participants: FirestoreChatParticipant[] = [
     { username: params.myUsername.trim(), name: params.myName.trim(), location: params.myLocation || "기숙사", avatarUrl: params.myAvatar },
@@ -1145,6 +1148,8 @@ export const getOrCreateFirestoreChatRoom = async (params: {
   ].filter(Boolean)));
 
   const nowStr = formatKoreanChatTime();
+  const createLogText = `[${nowStr}] 1:1 대화방 개설: @${params.myUsername}(${params.myName}) ↔ @${params.targetUsername}(${params.targetName}) - ${params.productName || "물품"}`;
+
   const roomData: FirestoreChatRoom = {
     id: roomId,
     productId: params.productId ? String(params.productId) : undefined,
@@ -1156,33 +1161,86 @@ export const getOrCreateFirestoreChatRoom = async (params: {
     lastMessage: params.initialMessage ? params.initialMessage.trim() : `'${params.productName || "물품"}' 대화를 시작했습니다.`,
     lastTime: "방금 전",
     updatedAt: Date.now(),
-    messages: []
+    messages: [],
+    logs: [createLogText],
+    createdAt: Date.now()
   };
 
-  // 2. Persist room in Firestore
+  // 2. Persist room in Firestore (내역 및 로그 완벽 기록)
   if (isFirebaseAvailable && db) {
     try {
       const roomRef = doc(db, "chats", roomId);
       const docSnap = await getDoc(roomRef);
       if (!docSnap.exists()) {
-        await setDoc(roomRef, roomData, { merge: true });
+        const initialMessagesList: any[] = [];
+        if (params.initialMessage && params.initialMessage.trim()) {
+          const msgId = `m_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`;
+          const initialMsgObj = {
+            id: msgId,
+            senderUsername: params.myUsername,
+            senderName: params.myName,
+            text: params.initialMessage.trim(),
+            timestamp: nowStr,
+            createdAt: Date.now()
+          };
+          initialMessagesList.push(initialMsgObj);
+
+          // Subcollection messages에 개별 문서 저장
+          const msgDocRef = doc(db, "chats", roomId, "messages", msgId);
+          await setDoc(msgDocRef, initialMsgObj);
+        }
+
+        // Firestore chats 문서 본문에 대화 내역(messages) 및 생성 로그(logs) 보존
+        await setDoc(roomRef, {
+          ...roomData,
+          messages: initialMessagesList,
+          logs: [createLogText],
+          createdAt: Date.now()
+        }, { merge: true });
+
+        // Firestore chats 하위 logs 서브컬렉션에도 감사 로그 저장
+        const logDocRef = doc(db, "chats", roomId, "logs", `log_${Date.now()}`);
+        await setDoc(logDocRef, {
+          id: `log_${Date.now()}`,
+          action: "ROOM_CREATED",
+          details: createLogText,
+          timestamp: nowStr,
+          createdAt: Date.now()
+        }).catch(() => {});
       } else {
         // 기존 대화방의 마지막 대화 내역 및 시간 보존
         const existingData = docSnap.data();
         const existingUsernames = existingData.participantUsernames || [];
+        const existingMessages = Array.isArray(existingData.messages) ? existingData.messages : [];
+        const existingLogs = Array.isArray(existingData.logs) ? existingData.logs : [];
+        const accessLogText = `[${nowStr}] 대화방 접속: @${params.myUsername}(${params.myName})`;
+
         await updateDoc(roomRef, {
           participants,
           participantUsernames: Array.from(new Set([...existingUsernames, ...participantUsernames])),
-          updatedAt: Date.now()
+          updatedAt: Date.now(),
+          logs: [...existingLogs.slice(-49), accessLogText]
         });
+
+        // Firestore chats 하위 logs 서브컬렉션에 접속 로그 저장
+        const logDocRef = doc(db, "chats", roomId, "logs", `log_${Date.now()}`);
+        await setDoc(logDocRef, {
+          id: `log_${Date.now()}`,
+          action: "ROOM_ACCESSED",
+          details: accessLogText,
+          timestamp: nowStr,
+          createdAt: Date.now()
+        }).catch(() => {});
+
         roomData.lastMessage = existingData.lastMessage || roomData.lastMessage;
         roomData.lastTime = existingData.lastTime || roomData.lastTime;
         roomData.updatedAt = existingData.updatedAt || roomData.updatedAt;
-        roomData.messages = existingData.messages || [];
+        roomData.messages = existingMessages;
+        roomData.logs = [...existingLogs.slice(-49), accessLogText];
       }
 
-      // If initialMessage provided, add to subcollection
-      if (params.initialMessage && params.initialMessage.trim()) {
+      // If initialMessage provided and doc existed, add to subcollection
+      if (docSnap.exists() && params.initialMessage && params.initialMessage.trim()) {
         const msgId = `m_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`;
         const msgDocRef = doc(db, "chats", roomId, "messages", msgId);
         await setDoc(msgDocRef, {
@@ -1260,11 +1318,26 @@ export const sendFirestoreChatMessage = async (params: {
     ...(params.targetName ? [params.targetName.trim(), params.targetName.trim().toLowerCase()] : [])
   ].filter(Boolean);
 
-  // 1. Save directly to Firestore subcollection & update chat room doc
+  const msgLogText = `[${nowStr}] 메시지: @${params.senderUsername}(${params.senderName}): ${displayLastMsg}`;
+
+  // 1. Save directly to Firestore subcollection & update chat room doc with messages history and logs
   if (isFirebaseAvailable && db) {
     try {
+      // Subcollection 'messages'에 개별 메시지 문서 저장
       const messageDocRef = doc(db, "chats", params.roomId, "messages", messageId);
       await setDoc(messageDocRef, messageData);
+
+      // Subcollection 'logs'에 개별 전송 로그 문서 저장
+      const logDocRef = doc(db, "chats", params.roomId, "logs", `log_${Date.now()}`);
+      await setDoc(logDocRef, {
+        id: `log_${Date.now()}`,
+        action: "MESSAGE_SENT",
+        sender: params.senderUsername,
+        senderName: params.senderName,
+        text: displayLastMsg,
+        timestamp: nowStr,
+        createdAt: Date.now()
+      }).catch(() => {});
 
       const roomDocRef = doc(db, "chats", params.roomId);
       const roomSnap = await getDoc(roomDocRef).catch(() => null);
@@ -1272,15 +1345,20 @@ export const sendFirestoreChatMessage = async (params: {
       if (roomSnap && roomSnap.exists()) {
         const data = roomSnap.data();
         const existingPUsernames: string[] = data.participantUsernames || [];
+        const existingMessages: any[] = Array.isArray(data.messages) ? data.messages : [];
+        const existingLogs: string[] = Array.isArray(data.logs) ? data.logs : [];
         const updatedPUsernames = Array.from(new Set([
           ...existingPUsernames, 
           ...extraUsernames
         ]));
+
         await updateDoc(roomDocRef, {
           lastMessage: displayLastMsg,
           lastTime: "방금 전",
           updatedAt: Date.now(),
-          participantUsernames: updatedPUsernames
+          participantUsernames: updatedPUsernames,
+          messages: [...existingMessages.slice(-99), messageData],
+          logs: [...existingLogs.slice(-49), msgLogText]
         });
       } else {
         const participants: FirestoreChatParticipant[] = [
@@ -1309,7 +1387,10 @@ export const sendFirestoreChatMessage = async (params: {
           lastTime: "방금 전",
           updatedAt: Date.now(),
           participantUsernames: Array.from(new Set(extraUsernames)),
-          participants
+          participants,
+          messages: [messageData],
+          logs: [msgLogText],
+          createdAt: Date.now()
         }, { merge: true });
       }
     } catch (err) {

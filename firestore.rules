@@ -38,11 +38,15 @@ service cloud.firestore {
       allow delete: if true;
     }
 
-    // 2. Chats collection & nested messages
+    // 2. Chats collection & nested messages and logs
     match /chats/{chatRoomId} {
       allow read, write: if true;
 
       match /messages/{messageId} {
+        allow read, write: if true;
+      }
+
+      match /logs/{logId} {
         allow read, write: if true;
       }
     }
